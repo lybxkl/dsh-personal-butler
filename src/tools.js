@@ -17,6 +17,11 @@ function text(value, fallback = '完成') {
   return [{ type: 'text', text: value.text || fallback }];
 }
 
+function sessionOf(exec) {
+  const id = exec && exec.agent && exec.agent.id;
+  return id ? String(id) : undefined;
+}
+
 const COLLECTION_LABEL = { assets: '资产', plans: '额度计划', todos: '待办', debts: '借贷', items: '物品' };
 
 /** 把 reminder 记录的内部形状翻译成人话（syncItem 写的是任务 id，不是 state 字段）。 */
@@ -161,8 +166,8 @@ export function registerTools(ctx, service, helpers) {
       allowDuplicate: { type: 'boolean', description: '同一款软件要建第二条（另一个账号）时传 true' },
     },
     output: { schema: { type: 'json' }, render: (args, value) => text(value) },
-    async execute(args) {
-      const result = await service.upsertAsset(args);
+    async execute(args, exec) {
+      const result = await service.upsertAsset(args, { sessionId: sessionOf(exec) });
       if (!result.ok) return result;
       const record = result.data.record;
       const renewed = Boolean(result.data.renewed);
@@ -243,8 +248,8 @@ export function registerTools(ctx, service, helpers) {
       confirmed: { type: 'boolean', description: '是否已和用户确认过提醒时间' },
     },
     output: { schema: { type: 'json' }, render: (args, value) => text(value) },
-    async execute(args) {
-      const result = await service.upsertTodo({ ...args, source: args.source || 'model' });
+    async execute(args, exec) {
+      const result = await service.upsertTodo({ ...args, source: args.source || 'model' }, { sessionId: sessionOf(exec) });
       if (!result.ok) return result;
       const record = result.data.record;
       const what = record.direction === 'waiting_other' ? `等 ${record.counterpart || '对方'} 回应` : '我要做';
@@ -275,8 +280,8 @@ export function registerTools(ctx, service, helpers) {
       advanceMinutes: { type: 'number', description: '提前多少分钟提醒' },
     },
     output: { schema: { type: 'json' }, render: (args, value) => text(value) },
-    async execute(args) {
-      const result = await service.upsertDebt({ ...args, source: args.source || 'model' });
+    async execute(args, exec) {
+      const result = await service.upsertDebt({ ...args, source: args.source || 'model' }, { sessionId: sessionOf(exec) });
       if (!result.ok) return result;
       const record = result.data.record;
       const who = record.direction === 'owedToMe' ? `${record.counterpart} 欠我` : `我欠 ${record.counterpart}`;
@@ -750,8 +755,8 @@ export function registerTools(ctx, service, helpers) {
       choice: { type: 'string', required: true, description: '用户的选择：1 / 2 / 选项原文' },
     },
     output: { schema: { type: 'json' }, render: (args, value) => text(value) },
-    async execute(args) {
-      const result = await service.resolvePending(args);
+    async execute(args, exec) {
+      const result = await service.resolvePending({ ...args, sessionId: sessionOf(exec) });
       if (!result.ok) return result;
       return { ok: true, applied: result.data.applied, text: result.data.text, pending: result.data.pending };
     },

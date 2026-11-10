@@ -182,3 +182,31 @@ test('normalizePending：老数据/脏字段也能归一化', () => {
   const span = Date.parse(view.expiresAt) - Date.parse(view.createdAt);
   assert.equal(Math.round(span / 3600000), 24);
 });
+test('上下文：从会话创建的记录会记住 originSessionId，面板创建则留空', async () => {
+  const { store, service } = makeService();
+  const fromChat = await service.upsertTodo({ title: '交周报', dueAt: '明天 9:00' }, { sessionId: 'sess-qq-1' });
+  assert.equal(fromChat.ok, true);
+  assert.equal(store.find('todos', fromChat.data.record.id).originSessionId, 'sess-qq-1');
+
+  const fromPanel = await service.mutate({ collection: 'todos', op: 'create', record: { title: '面板建的' } });
+  assert.equal(fromPanel.ok, true);
+  assert.equal(store.find('todos', fromPanel.data.record.id).originSessionId, null);
+
+  const viaMutate = await service.mutate({ collection: 'assets', op: 'create', record: { name: 'Chat 订阅', amount: 1 } }, { sessionId: 'sess-qq-2' });
+  assert.equal(viaMutate.ok, true);
+  assert.equal(store.find('assets', viaMutate.data.record.id).originSessionId, 'sess-qq-2');
+});
+
+test('上下文：在别处回「1」落库时，来源会话记成回话的那个', async () => {
+  const { store, service } = makeService();
+  const created = await service.createPending({
+    question: '记成待办？',
+    options: ['对，就这样记', '先不记'],
+    collection: 'todos',
+    op: 'create',
+    record: { title: '从待确认建的' },
+  });
+  const resolved = await service.resolvePending({ id: created.data.pending.id, choice: '1', sessionId: 'sess-qq-9' });
+  assert.equal(resolved.ok, true);
+  assert.equal(store.find('todos', resolved.data.applied.id).originSessionId, 'sess-qq-9');
+});

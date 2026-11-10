@@ -236,3 +236,49 @@ test('提醒：正文版本号参与幂等签名，改文案会让老任务重�
   assert.ok(calls.some((c) => c.op === 'edit'));
   assert.match(store.find('todos', todo.id).reminder.sig, /^v3\|/);
 });
+
+test('提醒：reminderTarget=origin 会把提醒投回创建记录的那个会话', async () => {
+  const { store, config, reminders, calls } = makeEnv();
+  config.reminderTarget = 'origin';
+  const todo = store.put('todos', { title: '交周报', dueAt: future(6), originSessionId: 'sess-qq-42' });
+  assert.equal((await reminders.syncItem('todos', todo)).status, 'created');
+  const creates = calls.filter((c) => c.op === 'create');
+  assert.ok(creates.length > 0);
+  for (const call of creates) {
+    assert.deepEqual(call.request.target, { kind: 'session', sessionId: 'sess-qq-42' });
+  }
+  // 提醒正文还是要带编号，用户在 QQ 里回数字才算数
+  assert.match(creates.at(-1).request.prompt, /butler_ask/);
+});
+
+test('提醒：origin 但记录没有来源会话时退回 new_once（不丢提醒）', async () => {
+  const { store, config, reminders, calls } = makeEnv();
+  config.reminderTarget = 'origin';
+  const todo = store.put('todos', { title: '交周报', dueAt: future(6) });
+  assert.equal((await reminders.syncItem('todos', todo)).status, 'created');
+  const creates = calls.filter((c) => c.op === 'create');
+  assert.ok(creates.length > 0);
+  for (const call of creates) assert.equal(call.request.target, undefined);
+});
+
+test('提醒：origin 会话失效时退回 new_once 并留下日志', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'butler-rem-'));
+  const store = new Store({ filePath: join(dir, 'butler.json') }).load();
+  const config = { advanceMinutes: 30, reminderTarget: 'origin', reminderSession: '', reminderTitlePrefix: '管家提醒' };
+  const requests = [];
+  const schedule = {
+    async create(request) {
+      requests.push(JSON.parse(JSON.stringify({ ...request, target: request.target || null })));
+      if (request.target) throw new Error('session sess-dead not found');
+      return { id: `task-${requests.length}` };
+    },
+    async edit() { return {}; },
+    async remove() { return {}; },
+  };
+  const reminders = createReminders({ store, config, getSchedule: () => schedule });
+  const todo = store.put('todos', { title: '交周报', dueAt: future(6), originSessionId: 'sess-dead' });
+  const result = await reminders.syncItem('todos', todo);
+  assert.equal(result.status, 'created');
+  assert.equal(requests[0].target.kind, 'session');
+  assert.equal(requests.some((r) => r.target === null), true, '必须有一次不带 target 的重试');
+});

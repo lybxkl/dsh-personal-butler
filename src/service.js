@@ -419,7 +419,7 @@ export function createService({ store, config, kinds, credentials, quota, remind
     let applied = null;
     if (chosen.applies && current.payload && current.payload.collection) {
       const { collection, op, id: targetId, record: payloadRecord } = current.payload;
-      const result = await mutate({ collection, op, id: op === 'create' ? null : targetId, record: payloadRecord });
+      const result = await mutate({ collection, op, id: op === 'create' ? null : targetId, record: payloadRecord }, { sessionId: input.sessionId });
       if (!result.ok) {
         return fail(`选项选好了，但落库失败：${result.error}（这条还开着，可以改完再回）`);
       }
@@ -452,7 +452,7 @@ export function createService({ store, config, kinds, credentials, quota, remind
     return done({ pending: pendingView(patched), text: '已取消这条待确认。' });
   }
 
-  async function upsertAsset(input) {
+  async function upsertAsset(input, context = {}) {
     if (!input || typeof input !== 'object') return fail('缺少资产字段');
     const existing = input.id ? store.find('assets', input.id) : null;
     if (input.id && !existing) return fail(`资产 ${input.id} 不存在`);
@@ -494,6 +494,8 @@ export function createService({ store, config, kinds, credentials, quota, remind
     }
     if (record.startedAt === undefined) record.startedAt = null;
 
+    // 记住这条是从哪个会话记的：reminderTarget=origin 时提醒投回这里（QQ 里记的就回 QQ）
+    if (context.sessionId) record.originSessionId = String(context.sessionId).slice(0, 120);
     const saved = store.put('assets', record);
     await reminders.syncItem('assets', saved);
     alerts.recompute();
@@ -759,7 +761,7 @@ export function createService({ store, config, kinds, credentials, quota, remind
 
   /* ------------------------------ 待办 ------------------------------ */
 
-  async function upsertTodo(input) {
+  async function upsertTodo(input, context = {}) {
     if (!input || typeof input !== 'object') return fail('缺少待办字段');
     const existing = input.id ? store.find('todos', input.id) : null;
     if (input.id && !existing) return fail(`待办 ${input.id} 不存在`);
@@ -777,6 +779,7 @@ export function createService({ store, config, kinds, credentials, quota, remind
     });
     if (!record.title) return fail('待办必须有标题');
 
+    if (context.sessionId) record.originSessionId = String(context.sessionId).slice(0, 120);
     const saved = store.put('todos', record);
     await reminders.syncItem('todos', saved);
     alerts.recompute();
@@ -796,7 +799,7 @@ export function createService({ store, config, kinds, credentials, quota, remind
 
   /* ------------------------------ 借贷 ------------------------------ */
 
-  async function upsertDebt(input) {
+  async function upsertDebt(input, context = {}) {
     if (!input || typeof input !== 'object') return fail('缺少借贷字段');
     const existing = input.id ? store.find('debts', input.id) : null;
     if (input.id && !existing) return fail(`借贷 ${input.id} 不存在`);
@@ -818,6 +821,7 @@ export function createService({ store, config, kinds, credentials, quota, remind
     if (record.status === 'settled' && !record.settledAt) record.settledAt = nowIso();
     if (record.status !== 'settled') record.settledAt = null;
 
+    if (context.sessionId) record.originSessionId = String(context.sessionId).slice(0, 120);
     const saved = store.put('debts', record);
     await reminders.syncItem('debts', saved);
     alerts.recompute();
@@ -1036,7 +1040,7 @@ export function createService({ store, config, kinds, credentials, quota, remind
   }
 
   /** 面板的统一写入口。 */
-  async function mutate({ collection, op, id, record }) {
+  async function mutate({ collection, op, id, record }, context = {}) {
     if (!COLLECTIONS.includes(collection)) return fail(`collection 必须是 ${COLLECTIONS.join(' / ')}`);
     if (op === 'delete') {
       if (!id) return fail('delete 需要 id');
@@ -1047,10 +1051,10 @@ export function createService({ store, config, kinds, credentials, quota, remind
       // create 带 id 会静默变成 update 并覆盖别人的记录，直接拒掉
       if (op === 'create' && record && record.id) return fail('新建时不要带 id；要改已有记录请用 op=update');
       const payload = { ...(record || {}), ...(id ? { id } : {}) };
-      if (collection === 'assets') return upsertAsset(payload);
+      if (collection === 'assets') return upsertAsset(payload, context);
       if (collection === 'plans') return upsertPlan(payload);
-      if (collection === 'todos') return upsertTodo(payload);
-      if (collection === 'debts') return upsertDebt(payload);
+      if (collection === 'todos') return upsertTodo(payload, context);
+      if (collection === 'debts') return upsertDebt(payload, context);
       if (collection === 'items') return upsertItem(payload);
     }
     return fail(`不支持的 op「${op}」`);

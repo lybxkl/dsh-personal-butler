@@ -71,16 +71,20 @@ export function createReminders({ store, config, logger, getSchedule, onChange }
     }
   }
 
-  function buildTarget() {
+  function buildTarget(record) {
     switch (config.reminderTarget) {
       case 'new': return { kind: 'new' };
+      // 投回「当初记这条的那个会话」：QQ 里记的，到点提醒就回到那个 QQ 会话
+      case 'origin': return record && record.originSessionId
+        ? { kind: 'session', sessionId: String(record.originSessionId) }
+        : undefined;
       case 'session': return config.reminderSession ? { kind: 'session', sessionId: config.reminderSession } : undefined;
       case 'new_once':
       default: return undefined; // 省略即 new_once（预留一个会话、首次投递创建后复用）
     }
   }
 
-  async function createTask({ title, prompt, when }) {
+  async function createTask({ title, prompt, when, record }) {
     const svc = schedule();
     if (!svc) throw new Error('schedule service unavailable');
 
@@ -95,7 +99,7 @@ export function createReminders({ store, config, logger, getSchedule, onChange }
     let lastError = null;
     for (const shape of shapes) {
       const request = { title, prompt, timing: buildTiming(shape, when) };
-      const target = buildTarget();
+      const target = buildTarget(record);
       if (target) request.target = target;
       try {
         const id = await attempt(request);
@@ -276,6 +280,7 @@ export function createReminders({ store, config, logger, getSchedule, onChange }
           title: taskTitle(collection, record, 'advance'),
           prompt: buildPrompt({ collection, record, when: new Date(advanceAt), kind: 'advance' }),
           when: new Date(advanceAt),
+          record,
         });
         patch.reminder.advanceTaskId = created.id;
       }
@@ -284,6 +289,7 @@ export function createReminders({ store, config, logger, getSchedule, onChange }
           title: taskTitle(collection, record, 'due'),
           prompt: buildPrompt({ collection, record, when: due, kind: 'due' }),
           when: due,
+          record,
         });
         patch.reminder.dueTaskId = created.id;
       }

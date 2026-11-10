@@ -150,7 +150,7 @@ QQ、微信、手机上看不到卡片时，直接回一个「1」即可 —— 
 - 到点提醒要求模型**必须让你当场表态**（已处理完 / 我这就去 / 延后 10 分钟 / 延后到明天）——「加强提醒」不是多响一次，而是非确认不可。
   表态同样走**编号文字**（1/2/3/4），所以 QQ 上回个数字也算；卡片能弹就顺带弹一张，不依赖它。
 - 改时间、结清、完成 → 旧任务自动撤掉；幂等，不会堆任务。
-- 默认投进**专属会话**（`new_once`），不打断你正在聊的窗口。注意：`new_once` 是**每条任务各自预留一个会话**，提醒多了侧栏会出现多个「管家提醒」会话；想集中到一个会话就把 `reminderTarget` 设成 `session` 并填 `reminderSession`。
+- 想让提醒回到**你当初记它的那个聊天**（比如 QQ），把 `reminderTarget` 设成 `origin`；该会话没了会自动退回 `new_once`，不会丢提醒。注意：`new_once` 是**每条任务各自预留一个会话**，提醒多了侧栏会出现多个「管家提醒」会话；想集中到一个会话就把 `reminderTarget` 设成 `session` 并填 `reminderSession`。
 
 ---
 
@@ -164,7 +164,7 @@ QQ、微信、手机上看不到卡片时，直接回一个「1」即可 —— 
 | `advanceMinutes` | `30` | 默认提前量（单条可覆盖；`0` = 只在到点提醒） |
 | `currency` | `CNY` | 默认货币 |
 | `maxSnapshots` | `240` | 每个计划保留的采样条数 |
-| `reminderTarget` | `new_once` | `new_once` / `new` / `session` |
+| `reminderTarget` | `new_once` | `new_once` / `new` / `session` / `origin`（投回记这条时的会话，QQ 里记的就提醒到 QQ） |
 | `reminderSession` | `''` | `reminderTarget=session` 时的目标会话 |
 | `apiToken` | `''` | 面板 HTTP 路由的额外令牌；空 = 只校验 loopback + Origin |
 | `dataDir` | 空 | 数据目录；空 = `$DSH_PROFILE_DIR/butler` → `$DSH_HOME/butler` → `~/.dsh/butler` |

@@ -12,7 +12,7 @@ export const DEFAULT_CONFIG = Object.freeze({
   advanceMinutes: 30,
   /** 默认货币。 */
   currency: 'CNY',
-  /** 提醒投递目标：new_once | new | session */
+  /** 提醒投递目标：new_once | new | session | origin（原会话，通常是发起记录的那个聊天） */
   reminderTarget: 'new_once',
   /** reminderTarget=session 时使用的会话 id。 */
   reminderSession: '',
@@ -52,7 +52,7 @@ export function normalizeConfig(raw) {
     out[key] = Number.isFinite(n) ? Math.min(max, Math.max(min, Math.round(n))) : DEFAULT_CONFIG[key];
   }
 
-  if (!['new_once', 'new', 'session'].includes(out.reminderTarget)) out.reminderTarget = DEFAULT_CONFIG.reminderTarget;
+  if (!['new_once', 'new', 'session', 'origin'].includes(out.reminderTarget)) out.reminderTarget = DEFAULT_CONFIG.reminderTarget;
   if (out.reminderTarget === 'session' && !String(out.reminderSession || '').trim()) {
     // 没给目标会话就退回 new_once，不让提醒静默丢失
     out.reminderTarget = 'new_once';
