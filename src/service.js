@@ -7,6 +7,7 @@
  */
 
 import {
+  assetIdentity,
   CYCLE_LABEL,
   currencySymbol,
   deepMerge,
@@ -60,6 +61,25 @@ function newPlanRef() {
 
 function fail(message) {
   return { ok: false, error: String(message || '未知错误') };
+}
+
+/**
+ * 找「同一款软件、已经过期」的旧记录：命中就说明这是续费，应该更新那条而不是新建。
+ * 只看已过期的（未过期的同名订阅可能是第二个账号，随意合并会吃掉用户的记录）。
+ */
+function findExpiredTwin(store, input, kind) {
+  const key = assetIdentity({ kind, name: input.name });
+  if (!key) return null;
+  const nowMs = Date.now();
+  const expired = store.list('assets').filter((asset) => {
+    if (assetIdentity(asset) !== key) return false;
+    const at = asset.expiresAt ? new Date(asset.expiresAt).getTime() : NaN;
+    return Number.isFinite(at) && at <= nowMs;
+  });
+  if (!expired.length) return null;
+  // 有多条历史时，续最近过期的那条
+  expired.sort((a, b) => new Date(b.expiresAt).getTime() - new Date(a.expiresAt).getTime());
+  return expired[0];
 }
 
 function done(data) {
@@ -249,12 +269,25 @@ export function createService({ store, config, kinds, credentials, quota, remind
 
     const kindRes = requireKind(input.kind ?? existing?.kind ?? 'subscription');
     if (!existing && !safeText(input.name, 120)) return fail('资产必须有名称（照截图里的软件名填）');
+
+    // 同一款软件、旧记录已经过期 → 这是下一期订阅，直接续期到旧记录，别再堆一条重复的。
+    // 想并存第二个账号时传 allowDuplicate: true。
+    let target = existing;
+    let renewedFrom = null;
+    if (!target && !input.allowDuplicate) {
+      const twin = findExpiredTwin(store, input, kindRes.kind);
+      if (twin) {
+        target = twin;
+        renewedFrom = { id: twin.id, name: twin.name, expiresAt: twin.expiresAt, amount: twin.amount };
+      }
+    }
+
     const record = normalizeAsset({
-      ...(existing || {}),
+      ...(target || {}),
       ...pick(input, ['name', 'vendor', 'amount', 'currency', 'cycle', 'startedAt', 'autoRenew', 'notes', 'source', 'tags', 'reminder']),
       kind: kindRes.kind,
       expiresAt,
-      id: existing?.id,
+      id: target?.id,
     }, { currency: config.currency });
 
     if (!record.name) return fail('资产必须有名称');
@@ -270,7 +303,7 @@ export function createService({ store, config, kinds, credentials, quota, remind
     await reminders.syncItem('assets', saved);
     alerts.recompute();
     hooks?.onDataChanged?.('assets');
-    return done({ record: store.find('assets', saved.id), kindAutoRegistered: kindRes.autoRegistered });
+    return done({ record: store.find('assets', saved.id), kindAutoRegistered: kindRes.autoRegistered, renewed: Boolean(renewedFrom), previous: renewedFrom });
   }
 
   async function removeAsset(id) {

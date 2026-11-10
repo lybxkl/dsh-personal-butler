@@ -114,7 +114,9 @@ export function registerTools(ctx, service, helpers) {
     name: 'butler_asset_save',
     description:
       '新增或更新一项资产（软件订阅、会员、Token 套餐等）。传 id 表示更新，不传表示新增。'
-      + '写入前必须已经和用户确认过名称/金额/到期时间/周期。',
+      + '写入前必须已经和用户确认过名称/金额/到期时间/周期。'
+      + '同一款软件如果旧记录已经过期，不传 id 也会自动续期到那条旧记录（不会多出一条重复的）；'
+      + '如果用户确实有第二个账号要并存，传 allowDuplicate=true。',
     parameters: {
       id: { type: 'string', description: '要更新的资产 id；新增时留空' },
       name: { type: 'string', required: true, description: '资产名称，如 Claude Pro、腾讯视频会员' },
@@ -127,17 +129,26 @@ export function registerTools(ctx, service, helpers) {
       autoRenew: { type: 'boolean', description: '是否自动续费' },
       notes: { type: 'string', description: '备注' },
       source: { type: 'string', description: '来源：screenshot | manual | model' },
+      allowDuplicate: { type: 'boolean', description: '同一款软件要建第二条（另一个账号）时传 true' },
     },
     output: { schema: { type: 'json' }, render: (args, value) => text(value) },
     async execute(args) {
       const result = await service.upsertAsset(args);
       if (!result.ok) return result;
       const record = result.data.record;
+      const renewed = Boolean(result.data.renewed);
+      const previous = result.data.previous;
       return {
         ok: true,
-        text: `已记录资产：${record.name}（${record.id}）· ${record.amount} ${record.currency}/${record.cycle}`
-          + `${record.expiresAt ? ` · 到期 ${record.expiresAt}` : ''}`
+        text: (renewed
+          ? `已续期原有订阅：${record.name}（${record.id}）· 原到期 ${previous?.expiresAt || '—'} → 新到期 ${record.expiresAt || '—'}`
+          : `已记录资产：${record.name}（${record.id}）· ${record.amount} ${record.currency}/${record.cycle}`)
+          + `${renewed ? ` · ${record.amount} ${record.currency}/${record.cycle}` : ''}`
+          + `${!renewed && record.expiresAt ? ` · 到期 ${record.expiresAt}` : ''}`
+          + (renewed ? '\n没有新建重复记录，面板里那条旧订阅已经更新。' : '')
           + (result.data.kindAutoRegistered ? `\n注意：种类「${record.kind}」是新建的，已加入资产种类列表。` : ''),
+        renewed,
+        previous,
         record,
         kindAutoRegistered: result.data.kindAutoRegistered,
       };

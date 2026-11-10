@@ -331,6 +331,25 @@ export function isValidIso(v) {
 }
 
 /**
+ * 同一款服务的「身份键」：忽略大小写、空白与常见标点，
+ * 用来判断「这条订阅是不是同一款软件的另一期」，进而决定续期还是新建。
+ * 不忽略的东西：版本/档位（Pro、家庭版…）——它们算不同订阅。
+ */
+export function normalizeNameKey(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[\s\u3000]+/g, '')
+    .replace(/[·・:：,，.。()（）[\]【】\-_/\\|"'“”‘’]/g, '');
+}
+
+export function assetIdentity(record) {
+  if (!record) return '';
+  const kind = String(record.kind || 'subscription').toLowerCase();
+  const name = normalizeNameKey(record.name);
+  return name ? `${kind}|${name}` : '';
+}
+
+/**
  * 规范化成「无损 JSON」：工具输出必须是这条，否则宿主会拒收整条结果。
  * - undefined 字段丢掉；数组里的 undefined 变 null（保持长度）
  * - NaN / Infinity → null（JSON.stringify 会把它变成 null 或直接报错）

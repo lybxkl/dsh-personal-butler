@@ -242,6 +242,7 @@
         'settings.every': '每 {n}',
 
         'toast.saved': '已保存',
+        'toast.renewed': '已续期到原有订阅',
         'toast.deleted': '已删除',
         'toast.acked': '已确认',
         'toast.synced': '已同步提醒',
@@ -426,6 +427,7 @@
         'settings.title': 'Butler settings',
         'settings.saved': 'Settings saved',
         'toast.saved': 'Saved',
+        'toast.renewed': 'Renewed the existing subscription',
         'toast.deleted': 'Deleted',
         'toast.acked': 'Acknowledged',
         'toast.failed': 'Failed',
@@ -2167,7 +2169,11 @@
                         onSubmit: function () {
                           var record = dropEmptyNumbers(draft, ['amount']);
                           api.mutate('assets', 'create', record).then(function (outcome) {
-                            if (outcome && outcome.ok) setAdding(null);
+                            if (!outcome || !outcome.ok) return;
+                            setAdding(null);
+                            // 后端发现这是「同款软件的新一期订阅」时会把旧记录续期，别让用户以为没记上
+                            var payload = outcome.result && outcome.result.result;
+                            if (payload && payload.renewed) api.notify(t('toast.renewed'));
                           });
                         },
                         onCancel: function () {

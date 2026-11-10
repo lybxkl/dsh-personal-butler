@@ -278,3 +278,55 @@ test('计划视图：余额型窗口标成 balance，不再算「已用百分比
   assert.equal(empty.kind, 'balance');
   assert.equal(empty.level, 'critical');
 });
+
+test('续费：同款软件旧记录已过期时，再提交一次会续期到原记录', async () => {
+  const { service, store } = makeService();
+  const first = await service.upsertAsset({
+    name: 'Claude Pro',
+    amount: 20,
+    currency: 'USD',
+    cycle: 'monthly',
+    expiresAt: '2020-01-10 09:00',
+  });
+  assert.equal(first.ok, true);
+  const oldId = first.data.record.id;
+
+  const again = await service.upsertAsset({
+    name: 'claude  pro',       // 大小写/空格不同也算同一款
+    amount: 22,
+    currency: 'USD',
+    cycle: 'monthly',
+    expiresAt: '2027-01-10 09:00',
+  });
+  assert.equal(again.ok, true);
+  assert.equal(again.data.renewed, true);
+  assert.equal(again.data.record.id, oldId);
+  assert.equal(again.data.record.amount, 22);
+  assert.ok(again.data.record.expiresAt.startsWith('2027-01-10'));
+  assert.ok(again.data.previous.expiresAt.startsWith('2020-01-10'));
+  assert.equal(store.list('assets').length, 1);
+});
+
+test('续费：旧记录还没过期时不合并，新版另起一条', async () => {
+  const { service, store } = makeService();
+  await service.upsertAsset({ name: 'iCloud+ 200G', amount: 6, currency: 'CNY', cycle: 'monthly', expiresAt: '2099-01-10 09:00' });
+  const second = await service.upsertAsset({ name: 'iCloud+ 200G', amount: 6, currency: 'CNY', cycle: 'monthly', expiresAt: '2099-02-10 09:00' });
+  assert.equal(second.data.renewed, false);
+  assert.equal(store.list('assets').length, 2);
+});
+
+test('续费：allowDuplicate 明确要求并存时，即使旧记录过期也新建', async () => {
+  const { service, store } = makeService();
+  await service.upsertAsset({ name: 'Cursor Pro', amount: 20, currency: 'USD', cycle: 'monthly', expiresAt: '2020-01-10 09:00' });
+  const second = await service.upsertAsset({ name: 'Cursor Pro', amount: 20, currency: 'USD', cycle: 'monthly', expiresAt: '2027-01-10 09:00', allowDuplicate: true });
+  assert.equal(second.data.renewed, false);
+  assert.equal(store.list('assets').length, 2);
+});
+
+test('续费：不同档位/不同种类不算同一款', async () => {
+  const { service, store } = makeService();
+  await service.upsertAsset({ name: 'Claude Pro', amount: 20, currency: 'USD', expiresAt: '2020-01-10 09:00' });
+  const max = await service.upsertAsset({ name: 'Claude Max', amount: 100, currency: 'USD', expiresAt: '2027-01-10 09:00' });
+  assert.equal(max.data.renewed, false);
+  assert.equal(store.list('assets').length, 2);
+});
