@@ -10,6 +10,7 @@
  * 设计文档：docs/butler-plugin-design.md
  */
 
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -35,19 +36,57 @@ export const inject = ['tools', 'webServer'];
 const ROUTE_BASE = '/butler';
 const INITIAL_QUOTA_DELAY_MS = 4000;
 
+/** 这个目录里的 butler.json 是否已经有真实记录（用来判断「用户的数据在这儿」）。 */
+function hasButlerData(filePath) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    return ['assets', 'plans', 'todos', 'debts', 'items', 'photos', 'sources', 'alerts']
+      .reduce((total, key) => total + Object.keys(raw?.[key] || {}).length, 0) > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 数据目录。宿主重启后环境变量可能变（例如这次 DSH_HOME 有了、DSH_PROFILE_DIR 没了），
+ * 按顺序取第一个会换目录、让用户以为数据丢了。所以：**优先选已经有数据的那个目录**，
+ * 都没有数据时才按 DSH_PROFILE_DIR → profiles/<profile> → DSH_HOME → ~/.dsh 的顺序。
+ */
 function resolveDataDir(config, logger) {
   if (config.dataDir) return path.resolve(String(config.dataDir));
-  const candidates = [process.env.DSH_HOME, process.env.DSH_PROFILE_DIR, path.join(os.homedir(), '.dsh')];
-  for (const candidate of candidates) {
-    if (!candidate) continue;
+  const homes = [];
+  const push = (base) => {
+    if (!base) return;
     try {
-      return path.join(path.resolve(candidate), 'butler');
+      const resolved = path.resolve(String(base));
+      if (!homes.includes(resolved)) homes.push(resolved);
     } catch {
-      /* 下一个 */
+      /* 忽略非法路径 */
+    }
+  };
+  push(process.env.DSH_PROFILE_DIR);
+  if (process.env.DSH_HOME && process.env.DSH_PROFILE) push(path.join(process.env.DSH_HOME, 'profiles', process.env.DSH_PROFILE));
+  push(process.env.DSH_HOME);
+  push(path.join(os.homedir(), '.dsh'));
+  // 宿主的 profile 目录都扫一遍：数据常常落在 profiles/<name>/butler 下
+  for (const home of [...homes]) {
+    try {
+      for (const name of fs.readdirSync(path.join(home, 'profiles'), { withFileTypes: true })) {
+        if (name.isDirectory()) push(path.join(home, 'profiles', name.name));
+      }
+    } catch {
+      /* 没有 profiles 目录就算了 */
     }
   }
-  logger?.warn?.('[butler] 无法确定 DSH_HOME，数据放在当前目录的 .butler 下');
-  return path.resolve(process.cwd(), '.butler');
+  const dirs = homes.map((base) => path.join(base, 'butler'));
+  const existing = dirs.find((dir) => hasButlerData(path.join(dir, 'butler.json')));
+  if (existing) {
+    if (dirs[0] && existing !== dirs[0]) {
+      logger?.info?.(`[butler] 数据目录按已有数据选定：${existing}（当前环境首选是 ${dirs[0]}）`);
+    }
+    return existing;
+  }
+  return dirs[0] || path.resolve(process.cwd(), '.butler');
 }
 
 export function apply(ctx, rawConfig = {}) {
