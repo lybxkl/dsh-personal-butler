@@ -2179,7 +2179,7 @@
                 assets.length
                   ? h(
                       'ul',
-                      { className: 'btl-list' },
+                      { className: 'btl-list btl-list-grid' },
                       assets.map(function (asset) {
                         return h(AssetRow, {
                           key: asset.id,
@@ -2790,7 +2790,7 @@
           if (!items.length) return h('div', { className: 'btl-sublist-empty' }, hint);
           return h(
             'ul',
-            { className: 'btl-list' },
+            { className: 'btl-list btl-list-grid' },
             items.map(function (debt) {
               return h(DebtRow, {
                 key: debt.id,
@@ -3080,6 +3080,10 @@
         '.btl-count{font-size:11.5px;color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums}',
 
         '.btl-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}',
+        // 记录型列表（资产、借贷）在宽屏下两列排，一篇空白比一行一条省一半纵向空间
+        '.btl-list-grid{display:grid;grid-template-columns:1fr;gap:6px;align-items:start}',
+        '.btl-list-grid > li{min-width:0}',
+        '@media (min-width:1040px){.btl-list-grid{grid-template-columns:repeat(auto-fill,minmax(340px,1fr))}}',
         '.btl-item{display:flex;align-items:center;gap:11px;padding:10px 12px;border-radius:10px;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);transition:border-color .14s, background .14s}',
         '.btl-item-click,.btl-item-clickable{cursor:pointer}',
         '.btl-item-hover:hover,.btl-item-todo:hover,.btl-item-debt:hover{border-color:var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2)}',
