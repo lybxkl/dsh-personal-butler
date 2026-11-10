@@ -562,9 +562,10 @@ export function registerTools(ctx, service, helpers) {
     name: 'butler_item_save',
     description:
       '记录「家里的东西放在哪了」（收纳）。用户发照片或文字说「这个放哪了」时用。'
-      + '必须问清：是什么东西、放在哪（房间/柜子/抽屉都可以）、多少件、什么时候放的。'
-      + '用户发了图片时会自动把最近一张用户图片一起存下来（图片 id 不在 prompt 里，不用填）；'
-      + '想指定某一张就传 attachmentId。同一个东西换位置时带 id 更新，不要新建。',
+      + '必须问清：是什么东西、放在哪（房间/柜子/抽屉都可以）、多少件、什么时候放的；'
+      + '用户发的是照片，就先从图里认出是什么东西、放在哪、有几件，再和他确认。'
+      + '用户这次消息里带了图片时会自动把图一起存下来（只认这次的消息，不会翻出旧截图；图片 id 不在 prompt 里，不用填）。'
+      + '同一个东西换位置时带 id 更新，不要新建；想指定某一张图才传 attachmentId，不要存图时传 keepPhoto=false。',
     parameters: {
       id: { type: 'string', description: '要更新的物品 id；新增留空' },
       name: { type: 'string', required: true, description: '物品名称，如 充电器、备用钥匙、圣诞装饰' },
