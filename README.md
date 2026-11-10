@@ -25,6 +25,8 @@
    （Agent 会调用宿主的 `plugin_manager install_bundle`；也可以在你的版本里用「设置 → 插件」的本地安装入口。**不要手改** profile 的 `package.json` / `cordis.patch.yml`。）
 3. 侧栏出现 🔔 **管家** 图标，点开就是面板。装完不需要重启宿主。
 
+装的是「这个目录」的链接，所以以后 `git pull` 拿到新版本、Host 半片会自动重载，**面板刷新页面即可**。
+
 **依赖**：宿主需已挂载 `dsh-tools`、`dsh-host-webserver`、`dsh-client-ui-slots`（桌面版默认都有）。
 **提醒功能**额外需要 `dsh-schedule`；没挂也能正常记账，只是不建提醒（面板「高级」里 `scheduleAvailable: false`）。
 
