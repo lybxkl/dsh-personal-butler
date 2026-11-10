@@ -128,14 +128,32 @@ export function parseWhen(input, reference = new Date()) {
     return new Date(now.getTime() + Math.round(n * mult));
   }
 
-  // 中文相对日：今天/明天/后天/大后天 (+ 可选 09:00)
-  const cnDay = s.match(/^(今天|明天|后天|大后天)\s*(\d{1,2})?[:：]?(\d{2})?$/);
+  // 中文相对日：今天/明天/后天/大后天 / 昨天/前天/大前天 (+ 可选 09:00)
+  const cnDay = s.match(/^(今天|明天|后天|大后天|昨天|前天|大前天)\s*(\d{1,2})?[:：]?(\d{2})?$/);
   if (cnDay) {
-    const offset = { 今天: 0, 明天: 1, 后天: 2, 大后天: 3 }[cnDay[1]];
+    const offset = { 大前天: -3, 前天: -2, 昨天: -1, 今天: 0, 明天: 1, 后天: 2, 大后天: 3 }[cnDay[1]];
     const base = addDays(now, offset);
     const h = cnDay[2] !== undefined ? Number(cnDay[2]) : 9;
     const m = cnDay[3] !== undefined ? Number(cnDay[3]) : 0;
     return atLocal(base, h, m);
+  }
+
+  // 「3 天前」「2 小时前」「刚刚」这类过去时间（记东西什么时候放进去时最常用）
+  if (/^(刚刚|刚才|just now)$/i.test(s)) return new Date(now.getTime());
+  const ago = s.match(/^(\d+)\s*(分钟|分|小时|时|天|日|周|个?月|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|week|weeks)\s*(?:以?前|ago)$/i);
+  if (ago) {
+    const n = Number(ago[1]);
+    const unit = ago[2].toLowerCase();
+    const mult = /^(分钟|分|min|mins|minute|minutes)$/.test(unit)
+      ? MINUTE
+      : /^(小时|时|h|hr|hrs|hour|hours)$/.test(unit)
+        ? HOUR
+        : /^(周|w|week|weeks)$/.test(unit)
+          ? 7 * DAY
+          : /^(个?月)$/.test(unit)
+            ? 30 * DAY
+            : DAY;
+    return new Date(now.getTime() - Math.round(n * mult));
   }
 
   // 中文周：周三 / 下周三 (+ 可选 09:00)

@@ -6,6 +6,7 @@
  */
 
 import { defineTool } from '@deepseek-ai/dsh-tools';
+import { userImageRefs } from './image-refs.js';
 import { fmtLocal, humanDelta, jsonSafe } from './util.js';
 
 function text(value, fallback = '完成') {
@@ -16,7 +17,7 @@ function text(value, fallback = '完成') {
   return [{ type: 'text', text: value.text || fallback }];
 }
 
-const COLLECTION_LABEL = { assets: '资产', plans: '额度计划', todos: '待办', debts: '借贷' };
+const COLLECTION_LABEL = { assets: '资产', plans: '额度计划', todos: '待办', debts: '借贷', items: '物品' };
 
 /** 把 reminder 记录的内部形状翻译成人话（syncItem 写的是任务 id，不是 state 字段）。 */
 function describeReminder(reminder) {
@@ -30,8 +31,28 @@ function describeReminder(reminder) {
 
 
 export function registerTools(ctx, service, helpers) {
-  const { logger } = helpers;
+  const { logger, photos } = helpers;
   const disposers = [];
+
+  /** 把用户刚发的那张图复制进管家数据目录；返回 photoId（失败抛错，由调用方决定是否致命）。 */
+  async function keepUserPhoto(args, exec) {
+    if (!photos) throw new Error('当前宿主没有图片服务');
+    const refs = userImageRefs(exec);
+    const wanted = typeof args?.attachmentId === 'string' ? args.attachmentId.trim() : '';
+    const ref = wanted
+      ? refs.find((r) => String(r.attachmentId) === wanted)
+      : refs[refs.length - 1];
+    if (!ref) {
+      throw new Error(wanted
+        ? `找不到附件 ${wanted}（只能是本次对话里上传的图片）`
+        : '本次对话里没有找到图片：先把照片/截图发进来，我才能一起存下');
+    }
+    const attachments = (() => {
+      try { return ctx.get('attachments'); } catch { return undefined; }
+    })();
+    const record = await photos.saveFromRef(ref, { attachments });
+    return record.id;
+  }
 
   function register(definition) {
     const execute = definition?.execute;
@@ -531,6 +552,108 @@ export function registerTools(ctx, service, helpers) {
           + (data.skippedPast ? `，已过期跳过 ${data.skippedPast}` : ''),
         ...data,
       };
+    },
+  }));
+
+
+  /* ------------------------------ 物品收纳 ------------------------------ */
+
+  register(defineTool({
+    name: 'butler_item_save',
+    description:
+      '记录「家里的东西放在哪了」（收纳）。用户发照片或文字说「这个放哪了」时用。'
+      + '必须问清：是什么东西、放在哪（房间/柜子/抽屉都可以）、多少件、什么时候放的。'
+      + '用户发了图片时会自动把最近一张用户图片一起存下来（图片 id 不在 prompt 里，不用填）；'
+      + '想指定某一张就传 attachmentId。同一个东西换位置时带 id 更新，不要新建。',
+    parameters: {
+      id: { type: 'string', description: '要更新的物品 id；新增留空' },
+      name: { type: 'string', required: true, description: '物品名称，如 充电器、备用钥匙、圣诞装饰' },
+      location: { type: 'string', required: true, description: '位置，如 书房、阳台储物柜、电视柜抽屉' },
+      detail: { type: 'string', description: '更细的位置，如 第 2 层左边、贴着冰箱那侧' },
+      quantity: { type: 'number', description: '数量，如 2' },
+      unit: { type: 'string', description: '数量单位，如 个 / 把 / 盒' },
+      category: { type: 'string', description: '分类，如 电子配件 / 证件 / 药' },
+      placedAt: { type: 'string', description: '什么时候放的，支持 2026-11-10、昨天、3 天前' },
+      note: { type: 'string', description: '备注：干嘛用的、和什么放一起、多久没用过' },
+      tags: { type: 'string', description: '关键词，逗号或空格分隔，方便以后搜' },
+      attachmentId: { type: 'string', description: '指定某张图（一般不用传，默认存最近一张用户图）' },
+      keepPhoto: { type: 'boolean', description: '传 false 表示这次不要存图，只记位置' },
+      source: { type: 'string', description: '来源：screenshot | manual | model' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => text(value) },
+    async execute(args, exec) {
+      const payload = { ...args };
+      for (const key of ['attachmentId', 'keepPhoto']) delete payload[key];
+      const result = await service.upsertItem(payload);
+      if (!result.ok) return result;
+      let record = result.data.record;
+      let photoNote = '';
+      if (args.keepPhoto !== false) {
+        const hasImage = userImageRefs(exec).length > 0;
+        const wanted = typeof args.attachmentId === 'string' && args.attachmentId.trim();
+        if (hasImage || wanted) {
+          try {
+            const photoId = await keepUserPhoto(args, exec);
+            const attached = await service.attachPhotos(record.id, [photoId]);
+            if (attached.ok) {
+              record = attached.data.record;
+              photoNote = `\n照片已一起存好（共 ${record.photoCount} 张），面板里点开就能看。`;
+            } else {
+              photoNote = `\n（图片存下来了，但没挂到记录上：${attached.error}）`;
+            }
+          } catch (error) {
+            photoNote = wanted ? `\n⚠ 图片没存上：${error?.message || error}` : '';
+            if (wanted) return { ok: false, error: `物品已记录，但图片没存上：${error?.message || error}（id=${record.id}）` };
+          }
+        }
+      }
+      return {
+        ok: true,
+        text: `已收纳：${record.name} · ${record.placeLabel}${record.quantityLabel ? ` · ${record.quantityLabel}` : ''}`
+          + `${record.placedAt ? ` · ${record.placedAt.slice(0, 10)} 放的` : ''}（id=${record.id}）${photoNote}`,
+        record,
+      };
+    },
+  }));
+
+  register(defineTool({
+    name: 'butler_item_find',
+    description:
+      '按关键词找家里的东西（名称/位置/备注/标签全都能搜）。用户问「我的 XX 在哪」「XX 放哪儿了」时先查这里，再回答。'
+      + '查到几条就把位置、数量、放的时间说清楚；同时告诉他有没有照片。',
+    parameters: {
+      q: { type: 'string', description: '关键词，如 充电器、钥匙、药' },
+      location: { type: 'string', description: '只看某个位置，如 书房' },
+      limit: { type: 'number', description: '最多返回几条，默认 10' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => text(value) },
+    async execute(args) {
+      const result = service.findItems(args);
+      if (!result.ok) return result;
+      const { items, total } = result.data;
+      if (!items.length) {
+        return { ok: true, text: '没找到记录。可以让用户换个说法，或者问问他最近一次见到是什么时候、大概在哪个房间。', items: [], total: 0 };
+      }
+      const lines = items.map((item) => `- ${item.name} → ${item.placeLabel}`
+        + `${item.quantityLabel ? ` · ${item.quantityLabel}` : ''}`
+        + `${item.placedAt ? ` · ${item.placedAt.slice(0, 10)} 放的` : ''}`
+        + `${item.photoCount ? ` · ${item.photoCount} 张照片` : ''}`
+        + `${item.note ? ` · 备注：${item.note}` : ''}（id=${item.id}）`);
+      return { ok: true, text: `找到 ${total} 条：\n${lines.join('\n')}`, items, total };
+    },
+  }));
+
+  register(defineTool({
+    name: 'butler_item_delete',
+    description: '删除一条收纳记录（东西拿走了/记错了）。删之前先和用户确认；同时会把它的照片一起删掉。',
+    parameters: {
+      id: { type: 'string', required: true, description: '物品 id' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => text(value) },
+    async execute(args) {
+      const result = await service.removeItem(args.id);
+      if (!result.ok) return result;
+      return { ok: true, text: `已删除收纳记录 ${args.id}（含照片）` };
     },
   }));
 

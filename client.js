@@ -46,7 +46,39 @@
         'tab.assets': '资产',
         'tab.todos': '待办',
         'tab.debts': '账本',
+        'tab.items': '收纳',
         'tab.alerts': '提醒',
+
+        'items.section': '家里的东西',
+        'items.add': '收纳一件',
+        'items.addTitle': '收纳一件东西',
+        'items.name': '物品',
+        'items.namePh': '如：充电器、备用钥匙',
+        'items.location': '放在哪',
+        'items.locationPh': '如：书房 / 阳台储物柜',
+        'items.detail': '更细的位置',
+        'items.detailPh': '如：第 2 层左边',
+        'items.quantity': '数量',
+        'items.unit': '单位',
+        'items.unitPh': '个 / 把 / 盒',
+        'items.placedAt': '什么时候放的',
+        'items.placedAtPh': '昨天 / 3 天前 / 2026-11-10',
+        'items.note': '备注',
+        'items.notePh': '干嘛用的、和什么东西放一起',
+        'items.tags': '关键词',
+        'items.tagsPh': '逗号或空格分隔，方便以后搜',
+        'items.empty': '还没有收纳记录',
+        'items.emptyHint': '拍张照或说一句「某样东西放在哪」，以后直接问我东西在哪儿就行。',
+        'items.viewPhoto': '查看大图',
+        'items.addPhoto': '加照片',
+        'items.removePhoto': '删掉这张',
+        'items.uploading': '上传中…',
+        'items.uploaded': '照片已存好',
+        'items.readFail': '读取图片失败',
+        'items.photoCount': '{n} 张照片',
+        'items.placedAtShort': '{at} 放入',
+        'items.noPlace': '未填位置',
+        'items.lightHint': '点任意处关闭',
 
         'stat.monthly': '每月订阅支出',
         'stat.monthly.sub': '折合每年',
@@ -257,6 +289,8 @@
         'misc.count': '{n} 条',
         'misc.none': '—',
         'misc.listSep': '、',
+        'misc.sep': ' · ',
+        'misc.edit': '编辑',
 
         'app.stale': '已 {n} 分钟未更新',
 
@@ -310,7 +344,38 @@
         'tab.assets': 'Assets',
         'tab.todos': 'To-dos',
         'tab.debts': 'Ledger',
+        'tab.items': 'Storage',
         'tab.alerts': 'Alerts',
+        'items.section': 'Household items',
+        'items.add': 'Add item',
+        'items.addTitle': 'Store an item',
+        'items.name': 'Item',
+        'items.namePh': 'e.g. charger, spare keys',
+        'items.location': 'Where',
+        'items.locationPh': 'e.g. Study / balcony cabinet',
+        'items.detail': 'More detail',
+        'items.detailPh': 'e.g. 2nd shelf, left side',
+        'items.quantity': 'Quantity',
+        'items.unit': 'Unit',
+        'items.unitPh': 'pcs / boxes',
+        'items.placedAt': 'When stored',
+        'items.placedAtPh': 'yesterday / 3 days ago / 2026-11-10',
+        'items.note': 'Notes',
+        'items.notePh': "What it's for, what it's stored with",
+        'items.tags': 'Tags',
+        'items.tagsPh': 'Comma or space separated',
+        'items.empty': 'Nothing stored yet',
+        'items.emptyHint': 'Send a photo or say where something goes — later just ask me where it is.',
+        'items.viewPhoto': 'View photo',
+        'items.addPhoto': 'Add photo',
+        'items.removePhoto': 'Remove photo',
+        'items.uploading': 'Uploading…',
+        'items.uploaded': 'Photo saved',
+        'items.readFail': 'Could not read the image',
+        'items.photoCount': '{n} photo(s)',
+        'items.placedAtShort': 'put away {at}',
+        'items.noPlace': 'No location',
+        'items.lightHint': 'Click anywhere to close',
         'stat.monthly': 'Monthly spend',
         'stat.monthly.sub': 'Per year',
         'stat.nextExpiry': 'Next renewal',
@@ -510,6 +575,8 @@
         'badge.soon': 'expiring soon',
         'badge.expired': 'expired',
         'misc.listSep': ', ',
+        'misc.sep': ' · ',
+        'misc.edit': 'Edit',
         'app.stale': 'not updated for {n} min',
         'time.soon': 'soon',
         'time.justNow': 'just now',
@@ -1052,6 +1119,7 @@
         alert: 'M8 2.5l6 10.5H2l6-10.5zM8 6.5v3M8 11.2v.6',
         list: 'M3 4.5h10M3 8h10M3 11.5h6',
         bolt: 'M9 2L4 9h3.2L7 14l5-7H8.8L9 2z',
+        box: 'M2.6 5.4l5.4-2.4 5.4 2.4v5.2L8 13l-5.4-2.4zM2.6 5.4L8 8l5.4-2.6M8 8v5',
         user: 'M8 8a2.6 2.6 0 1 0 0-5.2A2.6 2.6 0 0 0 8 8zM3.2 13.4c.5-2.4 2.4-3.9 4.8-3.9s4.3 1.5 4.8 3.9',
         coin: 'M8 14A6 6 0 1 0 8 2a6 6 0 0 0 0 12zM8 4.8v6.4M6.2 6.4h3a1.4 1.4 0 0 1 0 2.8h-3',
         gear: 'M8 10.2A2.2 2.2 0 1 0 8 5.8a2.2 2.2 0 0 0 0 4.4zM8 1.8v1.6M8 12.6v1.6M2.9 4.6l1.3.8M11.8 10.6l1.3.8M2 8h1.6M12.4 8H14M2.9 11.4l1.3-.8M11.8 5.4l1.3-.8',
@@ -1430,6 +1498,7 @@
                 props.dirty ? h('span', { className: 'btl-form-dirty' }, t('form.dirty')) : null
               )
             : null,
+          props.photoBlock ? h('div', { className: 'btl-form-photos' }, props.photoBlock) : null,
           h(
             'div',
             { className: 'btl-form' },
@@ -3099,6 +3168,22 @@
         '.btl-item-done .btl-item-title{text-decoration:line-through;color:var(--dsw-alias-label-secondary)}',
         '.btl-item-done{opacity:.72}',
         '.btl-item-mark{width:28px;height:28px;flex:none;display:grid;place-items:center;border-radius:8px;font-size:11.5px;font-weight:650;text-transform:uppercase;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary)}',
+        '.btl-item-thumb{width:38px;height:38px;flex:none;display:grid;place-items:center;border-radius:8px;overflow:hidden;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary)}',
+        '.btl-item-thumb img{width:100%;height:100%;object-fit:cover;display:block;cursor:zoom-in}',
+        /* 照片条 */
+        '.btl-form-photos{margin-bottom:2px}',
+        '.btl-photoblock{display:flex;flex-wrap:wrap;gap:8px;margin:2px 0 12px}',
+        '.btl-photo{position:relative;width:78px;height:78px;flex:none;border-radius:9px;overflow:hidden;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);display:grid;place-items:center;font-size:11px;color:var(--dsw-alias-label-secondary)}',
+        '.btl-photo img{width:100%;height:100%;object-fit:cover;display:block;cursor:zoom-in}',
+        '.btl-photo-x{position:absolute;top:3px;right:3px;width:18px;height:18px;padding:0;border:none;border-radius:50%;background:rgba(8,10,14,.62);color:#fff;font-size:12px;line-height:1;cursor:pointer;display:grid;place-items:center}',
+        '.btl-photo-x:hover{background:var(--dsw-alias-state-error-primary)}',
+        '.btl-photo-loading{opacity:.7}',
+        '.btl-photo-add{width:78px;height:78px;flex:none;border-radius:9px;border:1px dashed var(--dsw-alias-border-l2);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;font-size:11px;color:var(--dsw-alias-label-secondary);cursor:pointer}',
+        '.btl-photo-add:hover{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary)}',
+        /* 大图查看 */
+        '.btl-lightbox{position:fixed;inset:0;z-index:80;background:rgba(6,8,12,.82);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:28px;cursor:zoom-out}',
+        '.btl-lightbox img{max-width:92vw;max-height:82vh;border-radius:10px;background:#fff;box-shadow:0 24px 64px rgba(0,0,0,.5)}',
+        '.btl-lightbox-cap{font-size:12.5px;color:rgba(255,255,255,.78)}',
         '.btl-item-mark[data-tone="danger"]{color:var(--dsw-alias-state-error-primary);background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 14%, transparent)}',
         '.btl-item-mark[data-tone="warn"]{color:var(--dsw-alias-state-warn-primary);background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 14%, transparent)}',
         '.btl-item-mark[data-tone="ok"]{color:var(--dsw-alias-state-success-primary);background:color-mix(in srgb, var(--dsw-alias-state-success-primary) 14%, transparent)}',
@@ -3298,6 +3383,503 @@
        * 主面板
        * ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ *
+       * 收纳（家里的东西放在哪）
+       * ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ *
+       * 收纳（家里的东西放在哪）
+       * ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ *
+       * 收纳（家里的东西放在哪）
+       * ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ *
+       * 收纳（家里的东西放在哪）
+       * ------------------------------------------------------------------ */
+
+/* ===== items block: generated from _build/client-items.js ===== */
+/* ------------------------------------------------------------------ *
+       * 收纳（家里的东西放在哪）
+       * ------------------------------------------------------------------ */
+
+      function itemFields() {
+        return [
+          { key: 'name', label: t('items.name'), required: true, placeholder: t('items.namePh'), autoFocus: true },
+          { key: 'location', label: t('items.location'), required: true, placeholder: t('items.locationPh') },
+          { key: 'detail', label: t('items.detail'), placeholder: t('items.detailPh') },
+          { key: 'quantity', label: t('items.quantity'), type: 'number', placeholder: '1' },
+          { key: 'unit', label: t('items.unit'), placeholder: t('items.unitPh') },
+          { key: 'placedAt', label: t('items.placedAt'), placeholder: t('items.placedAtPh') },
+          { key: 'note', label: t('items.note'), type: 'textarea', placeholder: t('items.notePh'), advanced: true },
+          { key: 'tags', label: t('items.tags'), placeholder: t('items.tagsPh'), advanced: true }
+        ];
+      }
+
+      function photoUrl(photo) {
+        return photo && photo.url ? photo.url : '';
+      }
+
+      /** 照片选择条：可看大图、可删、可加。 */
+      function PhotoPicker(props) {
+        var photos = props.photos || [];
+        return h(
+          'div',
+          { className: 'btl-photoblock' },
+          photos.map(function (photo) {
+            return h(
+              'span',
+              { className: 'btl-photo', key: photo.id },
+              h('img', {
+                src: photoUrl(photo),
+                alt: '',
+                loading: 'lazy',
+                onClick: function (event) {
+                  event.stopPropagation();
+                  if (props.onOpen) props.onOpen(photo);
+                }
+              }),
+              props.onRemove
+                ? h('button', {
+                    type: 'button',
+                    className: 'btl-photo-x',
+                    title: t('items.removePhoto'),
+                    onClick: function (event) {
+                      event.stopPropagation();
+                      props.onRemove(photo);
+                    }
+                  }, '×')
+                : null
+            );
+          }),
+          props.uploading
+            ? h('span', { className: 'btl-photo btl-photo-loading' }, t('items.uploading'))
+            : h(
+                'label',
+                { className: 'btl-photo-add', title: t('items.addPhoto') },
+                h(Ico, { name: 'plus', size: 15 }),
+                h('span', null, t('items.addPhoto')),
+                h('input', {
+                  type: 'file',
+                  accept: 'image/png,image/jpeg,image/gif,image/webp',
+                  multiple: true,
+                  style: { display: 'none' },
+                  onChange: function (event) {
+                    var files = event.target.files;
+                    if (props.onPick) props.onPick(files);
+                    event.target.value = '';
+                  }
+                })
+              )
+        );
+      }
+
+      function ItemRow(props) {
+        var item = props.item;
+        var editingState = React.useState(false);
+        var editing = editingState[0];
+        var setEditing = editingState[1];
+        var draftState = React.useState(null);
+        var draft = draftState[0];
+        var setDraft = draftState[1];
+
+        function begin() {
+          setDraft({
+            name: item.name,
+            location: item.location,
+            detail: item.detail || '',
+            quantity: item.quantity === null || item.quantity === undefined ? '' : String(item.quantity),
+            unit: item.unit || '',
+            placedAt: item.placedAt ? item.placedAt.slice(0, 16).replace('T', ' ') : '',
+            note: item.note || '',
+            tags: (item.tags || []).join(' ')
+          });
+          setEditing(true);
+        }
+
+        function photoIds() {
+          return (item.photos || []).map(function (photo) {
+            return photo.id;
+          });
+        }
+
+        if (editing) {
+          var current = draft || {};
+          return h(
+            'li',
+            { className: 'btl-item btl-item-editing' },
+            h(Form, {
+              title: item.name,
+              fields: itemFields(),
+              draft: current,
+              dirty: true,
+              busy: props.busy,
+              photoBlock: h(PhotoPicker, {
+                photos: item.photos,
+                uploading: props.uploading,
+                onOpen: props.onOpenPhoto,
+                onPick: function (files) {
+                  props.onPickPhotos(files, item, function (ids) {
+                    props.onAttach(item.id, photoIds().concat(ids));
+                  });
+                },
+                onRemove: function (photo) {
+                  props.onAttach(item.id, photoIds().filter(function (id) {
+                    return id !== photo.id;
+                  }));
+                  props.onDropPhoto(photo);
+                }
+              }),
+              onChange: function (patch) {
+                setDraft(Object.assign({}, current, patch));
+              },
+              onSubmit: function () {
+                props.onSave(
+                  Object.assign({ id: item.id }, current, { photoIds: photoIds() }),
+                  function (ok) {
+                    if (ok) setEditing(false);
+                  }
+                );
+              },
+              onCancel: function () {
+                setEditing(false);
+              },
+              onDelete: function () {
+                props.onDelete(item.id);
+              }
+            })
+          );
+        }
+
+        var meta = [
+          item.placeLabel || t('items.noPlace'),
+          item.quantityLabel || '',
+          item.placedAtLabel ? t('items.placedAtShort', { at: item.placedAtLabel }) : '',
+          item.photoCount ? t('items.photoCount', { n: item.photoCount }) : ''
+        ].filter(Boolean);
+
+        return h(
+          'li',
+          { className: 'btl-item btl-item-hover' },
+          h(
+            'span',
+            { className: 'btl-item-thumb' },
+            item.photos && item.photos.length
+              ? h('img', {
+                  src: photoUrl(item.photos[0]),
+                  alt: '',
+                  loading: 'lazy',
+                  onClick: function (event) {
+                    event.stopPropagation();
+                    props.onOpenPhoto(item.photos[0]);
+                  }
+                })
+              : h(Ico, { name: 'box', size: 16 })
+          ),
+          h(
+            'span',
+            {
+              className: 'btl-item-main btl-item-clickable',
+              onClick: begin,
+              role: 'button',
+              tabIndex: 0,
+              onKeyDown: activateOnKey(begin)
+            },
+            h('span', { className: 'btl-item-title btl-item-title-clamp' }, h('span', { className: 'btl-item-name' }, item.name)),
+            h('span', { className: 'btl-item-meta' }, meta.join(t('misc.sep')))
+          ),
+          h(
+            'span',
+            { className: 'btl-item-side' },
+            h(IconBtn, { icon: 'edit', title: t('misc.edit'), onClick: begin })
+          )
+        );
+      }
+
+      function ItemsTab(props) {
+        var data = props.data;
+        var api = props.api;
+        var query = props.query;
+        var addingState = React.useState(false);
+        var adding = addingState[0];
+        var setAdding = addingState[1];
+        var draftState = React.useState({});
+        var draft = draftState[0];
+        var setDraft = draftState[1];
+        var uploadState = React.useState(false);
+        var uploading = uploadState[0];
+        var setUploading = uploadState[1];
+        var lightState = React.useState(null);
+        var light = lightState[0];
+        var setLight = lightState[1];
+
+        var items = (data.items || []).filter(function (item) {
+          if (!query) return true;
+          return [item.name, item.location, item.detail, item.note, (item.tags || []).join(' ')]
+            .join(' ')
+            .toLowerCase()
+            .indexOf(query) >= 0;
+        });
+
+        function readAsDataUrl(blob) {
+          return new Promise(function (resolve, reject) {
+            var reader = new FileReader();
+            reader.onload = function () {
+              resolve(String(reader.result || ''));
+            };
+            reader.onerror = function () {
+              reject(new Error(t('items.readFail')));
+            };
+            reader.readAsDataURL(blob);
+          });
+        }
+
+        /* 手机原图动辄四五 MB：先缩到长边 1600 再传，省空间也省上传时间。
+           解码不了（HEIC 等）就原样上传，交给后端按字节嗅探兜底。 */
+        function shrinkImage(file) {
+          return new Promise(function (resolve) {
+            if (typeof document === 'undefined' || !document.createElement || typeof Image === 'undefined') {
+              resolve(file);
+              return;
+            }
+            readAsDataUrl(file)
+              .then(function (dataUrl) {
+                var image = new Image();
+                image.onload = function () {
+                  try {
+                    var maxSide = 1600;
+                    var scale = Math.min(1, maxSide / Math.max(image.width || 1, image.height || 1));
+                    if (scale >= 1 && file.size <= 1.2 * 1024 * 1024) {
+                      resolve(file);
+                      return;
+                    }
+                    var canvas = document.createElement('canvas');
+                    canvas.width = Math.max(1, Math.round((image.width || 1) * scale));
+                    canvas.height = Math.max(1, Math.round((image.height || 1) * scale));
+                    canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
+                    resolve(canvas.toDataURL('image/jpeg', 0.85));
+                  } catch (error) {
+                    resolve(file);
+                  }
+                };
+                image.onerror = function () {
+                  resolve(file);
+                };
+                image.src = dataUrl;
+              })
+              .catch(function () {
+                resolve(file);
+              });
+          });
+        }
+
+        /* 面板上传：缩图 → dataURL 交给 Host 落盘，拿回 {id,url} 再挂到记录上 */
+        function uploadFiles(files) {
+          var list = Array.prototype.slice.call(files || []).filter(Boolean).slice(0, 6);
+          if (!list.length) return Promise.resolve([]);
+          setUploading(true);
+          var uploaded = [];
+          var chain = Promise.resolve();
+          list.forEach(function (file) {
+            chain = chain.then(function () {
+              return shrinkImage(file)
+                .then(function (prepared) {
+                  return typeof prepared === 'string' ? prepared : readAsDataUrl(prepared);
+                })
+                .then(function (dataUrl) {
+                  return api.send('/photos', { dataUrl: dataUrl }, { key: 'photos', success: t('items.uploaded') });
+                })
+                .then(function (payload) {
+                  var photo = payload && payload.photo;
+                  if (photo && photo.id) uploaded.push(photo);
+                });
+            });
+          });
+          return chain
+            .catch(function () {
+              return null; // api.send 已经弹过错误
+            })
+            .then(function () {
+              setUploading(false);
+              return uploaded;
+            });
+        }
+
+        /* 删照片时连文件一起删，别在数据目录里留孤儿；已经被别的物件引用时后端会拒绝，忽略即可。 */
+        function dropPhoto(photo) {
+          if (!photo || !photo.id) return Promise.resolve();
+          return api.send('/photos/delete', { id: photo.id }, { key: 'photos' }).catch(function () {
+            return null;
+          });
+        }
+
+        function saveItem(record, done) {
+          var payload = Object.assign({}, record);
+          delete payload._photos;
+          if (typeof payload.quantity === 'string') {
+            payload.quantity = payload.quantity.trim() === '' ? null : Number(payload.quantity);
+          }
+          var op = payload.id ? 'update' : 'create';
+          api.mutate('items', op, payload, payload.id).then(function (outcome) {
+            if (done) done(Boolean(outcome && outcome.ok));
+          });
+        }
+
+        function attach(itemId, ids) {
+          api.mutate('items', 'update', { id: itemId, photoIds: ids }, itemId);
+        }
+
+        var addDraft = Object.assign({}, draft);
+
+        /* 新增表单里的照片还没挂到任何记录上，取消时要把这些文件删掉，否则会留在数据目录里。 */
+        function clearAddPhotos() {
+          var photos = addDraft._photos || [];
+          photos.forEach(dropPhoto);
+          setDraft({});
+        }
+
+        var addForm = adding
+          ? h(Form, {
+              title: t('items.addTitle'),
+              fields: itemFields(),
+              draft: addDraft,
+              busy: api.isBusy('mutate:items'),
+              photoBlock: h(PhotoPicker, {
+                photos: addDraft._photos || [],
+                uploading: uploading,
+                onOpen: setLight,
+                onPick: function (files) {
+                  uploadFiles(files).then(function (uploaded) {
+                    if (!uploaded || !uploaded.length) return;
+                    var next = (addDraft._photos || []).concat(uploaded);
+                    setDraft(
+                      Object.assign({}, addDraft, {
+                        _photos: next,
+                        photoIds: next.map(function (photo) {
+                          return photo.id;
+                        })
+                      })
+                    );
+                  });
+                },
+                onRemove: function (photo) {
+                  var next = (addDraft._photos || []).filter(function (one) {
+                    return one.id !== photo.id;
+                  });
+                  setDraft(
+                    Object.assign({}, addDraft, {
+                      _photos: next,
+                      photoIds: next.map(function (one) {
+                        return one.id;
+                      })
+                    })
+                  );
+                  dropPhoto(photo);
+                }
+              }),
+              onChange: function (patch) {
+                setDraft(Object.assign({}, addDraft, patch));
+              },
+              onSubmit: function () {
+                saveItem(addDraft, function (ok) {
+                  if (ok) {
+                    setAdding(false);
+                    setDraft({});
+                  }
+                });
+              },
+              onCancel: function () {
+                setAdding(false);
+                clearAddPhotos();
+              }
+            })
+          : null;
+
+        return h(
+          'div',
+          { className: 'btl-stack' },
+          h(
+            'div',
+            { className: 'btl-toolbar' },
+            h('span', { className: 'btl-toolbar-label' }, t('items.section')),
+            h('span', { className: 'btl-toolbar-gap' }),
+            h(Btn, {
+              tone: 'primary',
+              icon: 'plus',
+              size: 'sm',
+              onClick: function () {
+                setDraft({});
+                setAdding(true);
+              }
+            }, t('items.add'))
+          ),
+          addForm,
+          items.length
+            ? h(
+                'ul',
+                { className: 'btl-list btl-list-grid' },
+                items.map(function (item) {
+                  return h(ItemRow, {
+                    key: item.id,
+                    item: item,
+                    busy: api.isBusy('mutate:items'),
+                    uploading: uploading,
+                    onOpenPhoto: setLight,
+                    onPickPhotos: function (files, row, apply) {
+                      uploadFiles(files).then(function (uploaded) {
+                        if (uploaded && uploaded.length && apply) {
+                          apply(uploaded.map(function (photo) {
+                            return photo.id;
+                          }));
+                        }
+                      });
+                    },
+                    onSave: saveItem,
+                    onAttach: attach,
+                    onDropPhoto: dropPhoto,
+                    onDelete: function (id) {
+                      api.mutate('items', 'delete', null, id);
+                    }
+                  });
+                })
+              )
+            : adding
+              ? null
+              : h(
+                  'div',
+                  { className: 'btl-empty-narrow' },
+                  h(Empty, {
+                    icon: 'box',
+                    title: t('items.empty'),
+                    hint: t('items.emptyHint'),
+                    action: h(Btn, {
+                      tone: 'ghost',
+                      icon: 'plus',
+                      onClick: function () {
+                        setDraft({});
+                        setAdding(true);
+                      }
+                    }, t('items.add'))
+                  })
+                ),
+          light
+            ? h(
+                'div',
+                {
+                  className: 'btl-lightbox',
+                  role: 'dialog',
+                  'aria-modal': 'true',
+                  onClick: function () {
+                    setLight(null);
+                  }
+                },
+                h('img', { src: photoUrl(light), alt: t('items.viewPhoto') }),
+                h('div', { className: 'btl-lightbox-cap' }, t('items.lightHint'))
+              )
+            : null
+        );
+      }/* ===== /items block ===== */
       function pickNextAsset(assets) {
         var list = (assets || []).filter(function (asset) {
           return asset.expiresAt && toDate(asset.expiresAt);
@@ -3356,6 +3938,7 @@
           debts: debts.filter(function (debt) {
             return debt.status !== 'settled';
           }).length,
+          items: (data.items || []).length,
           alerts: alerts.length
         };
 
@@ -3363,13 +3946,16 @@
           { key: 'assets', label: tr('tab.assets'), icon: 'card' },
           { key: 'todos', label: tr('tab.todos'), icon: 'list' },
           { key: 'debts', label: tr('tab.debts'), icon: 'wallet' },
+          { key: 'items', label: tr('tab.items'), icon: 'box' },
           { key: 'alerts', label: tr('tab.alerts'), icon: 'bell' }
         ];
 
         var body = null;
         if (tab === 'assets') body = h(AssetsTab, { data: data, api: api, query: needle });
         else if (tab === 'todos') body = h(TodosTab, { data: data, api: api, query: needle });
-        else body = tab === 'debts' ? h(DebtsTab, { data: data, api: api, query: needle }) : h(AlertsTab, { data: data, api: api, query: needle });
+        else if (tab === 'debts') body = h(DebtsTab, { data: data, api: api, query: needle });
+        else if (tab === 'items') body = h(ItemsTab, { data: data, api: api, query: needle });
+        else body = h(AlertsTab, { data: data, api: api, query: needle });
 
         /* 轮询连续失败时，页头显式提示「已 N 分钟未更新」，避免一直显示旧数据 */
         var fallbackOk = toDate(data.nowIso);

@@ -20,6 +20,7 @@ import { createCredentials } from './src/credentials.js';
 import { createQuotaEngine } from './src/quota.js';
 import { createReminders } from './src/reminders.js';
 import { createAlerts } from './src/alerts.js';
+import { createPhotos } from './src/photos.js';
 import { createService } from './src/service.js';
 import { registerTools } from './src/tools.js';
 import { registerRoutes } from './src/routes.js';
@@ -107,6 +108,15 @@ export function apply(ctx, rawConfig = {}) {
 
   const alerts = createAlerts({ store, config, logger });
 
+  // 物品照片：会话附件会随会话清理，所以复制到 <dataDir>/photos 自己保管
+  const photos = createPhotos({ dir, store, logger });
+  // 对账：文件被删掉的照片记录清掉；归属物件已不在的解除挂接（避免面板显示永远加载不出的图）
+  try {
+    photos.reconcile();
+  } catch (error) {
+    logger?.warn?.(`[butler] 照片对账失败：${error?.message || error}`);
+  }
+
   let rearmPoll = () => {};
 
   service = createService({
@@ -117,6 +127,7 @@ export function apply(ctx, rawConfig = {}) {
     quota,
     reminders,
     alerts,
+    photos,
     hooks: {
       onDataChanged: (reason) => {
         try {
@@ -132,11 +143,11 @@ export function apply(ctx, rawConfig = {}) {
 
   /* ------------------------------ 面板 HTTP ------------------------------ */
 
-  const disposeRoutes = registerRoutes(ctx, service, { config, logger, basePath: ROUTE_BASE });
+  const disposeRoutes = registerRoutes(ctx, service, { config, logger, basePath: ROUTE_BASE, photos });
 
   /* ------------------------------ 模型工具 ------------------------------ */
 
-  const disposeTools = registerTools(ctx, service, { logger });
+  const disposeTools = registerTools(ctx, service, { logger, photos });
 
   /* ------------------------------ 意图剧本 ------------------------------ */
 

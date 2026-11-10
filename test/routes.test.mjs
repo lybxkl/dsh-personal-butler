@@ -215,3 +215,17 @@ test('路由：错误信息不会被包成 200，响应带 nosniff', async () =>
   assert.match(result.json.error, /内部炸了/);
   assert.equal(result.headers['x-content-type-options'], 'nosniff');
 });
+test('路由：service 的异步方法即使漏 await，失败原因也不会变成空失败', async () => {
+  const service = makeService({
+    removePhoto: async (id) => ({ ok: false, error: `照片 ${id} 不存在` }),
+  });
+  const route = mount({ service });
+  const result = await call(route, {
+    method: 'POST',
+    url: '/butler/api/photos/delete',
+    headers: { host: '127.0.0.1:64673', 'content-type': 'application/json' },
+    body: JSON.stringify({ id: 'ph_nope' }),
+  });
+  assert.equal(result.status, 400);
+  assert.match(result.json.error, /不存在/);
+});

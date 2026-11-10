@@ -31,15 +31,17 @@ import {
   normalizeAlert,
   normalizeAsset,
   normalizeDebt,
+  normalizeItem,
   normalizePlan,
   normalizeSource,
   normalizeTodo,
 } from './store.js';
 import { hostMatches, inspectSourceDraft, normalizeHosts, normalizeSourceId, runSourceCode, sampleOf } from './sources.js';
+import { placeLabel, photoView } from './photos.js';
 import { createHash } from 'node:crypto';
 import { sanitizePanelConfigPatch } from './defaults.js';
 
-const COLLECTIONS = ['assets', 'plans', 'todos', 'debts'];
+const COLLECTIONS = ['assets', 'plans', 'todos', 'debts', 'items'];
 const SOURCE_LABEL = { screenshot: '截图', manual: '手动', model: 'AI', import: '导入' };
 
 /** 试跑通过的代码指纹（内存级，30 分钟内有效）：保存前必须先试跑，靠它把关。 */
@@ -86,7 +88,7 @@ function done(data) {
   return { ok: true, data };
 }
 
-export function createService({ store, config, kinds, credentials, quota, reminders, alerts, hooks }) {
+export function createService({ store, config, kinds, credentials, quota, reminders, alerts, photos, hooks, recentImageRefs }) {
   /** 这个计划自己的额度源登记了哪些域名。 */
   function planSourceHosts(plan) {
     if (!plan) return [];
@@ -212,6 +214,7 @@ export function createService({ store, config, kinds, credentials, quota, remind
       plans,
       todos: snap.todos,
       debts: snap.debts,
+      items: snap.items.map(itemView),
       alerts: alerts.view(),
       kinds: kinds.view(),
       summary: {
@@ -220,6 +223,8 @@ export function createService({ store, config, kinds, credentials, quota, remind
         todoPending: pendingTodos.length,
         todoDone: snap.todos.filter((t) => t.status === 'done').length,
         debtOpen: snap.debts.filter((d) => d.status === 'open').length,
+        itemCount: snap.items.length,
+        photoCount: snap.photos.length,
         alertPending: alerts.pendingCount(),
         subscriptionTotals: totals.byCurrency || {},
         debtTotals,
@@ -640,6 +645,132 @@ export function createService({ store, config, kinds, credentials, quota, remind
     return done({ deleted: true, id });
   }
 
+  /* ------------------------------ 物品收纳 ------------------------------ */
+
+  /** 面板/模型看到的物品：补上位置描述、数量文案、照片 URL。 */
+  function itemView(item) {
+    const photos = (item.photoIds || [])
+      .map((id) => photoView(store.find('photos', id)))
+      .filter(Boolean);
+    const quantity = item.quantity === null || item.quantity === undefined ? null : item.quantity;
+    return {
+      ...item,
+      placeLabel: placeLabel(item),
+      quantityLabel: quantity === null ? '' : `${quantity}${item.unit ? ` ${item.unit}` : ''}`,
+      photos,
+      photoCount: photos.length,
+      placedAtLabel: item.placedAt ? fmtDate(item.placedAt) : '',
+    };
+  }
+
+  function itemHaystack(item) {
+    return [item.name, item.location, item.detail, item.note, item.category, (item.tags || []).join(' ')]
+      .join(' ')
+      .toLowerCase();
+  }
+
+  /** 找东西：按名称/位置/备注全文匹配，名称命中的排前面。 */
+  function findItems(options = {}) {
+    const q = String(options.q || options.query || '').trim().toLowerCase();
+    const location = String(options.location || '').trim().toLowerCase();
+    const limit = Math.min(50, Math.max(1, Number(options.limit) || 10));
+    let list = store.list('items').slice();
+    if (location) list = list.filter((item) => `${item.location} ${item.detail}`.toLowerCase().includes(location));
+    if (q) list = list.filter((item) => itemHaystack(item).includes(q));
+    list.sort((a, b) => {
+      const an = String(a.name).toLowerCase().includes(q) ? 0 : 1;
+      const bn = String(b.name).toLowerCase().includes(q) ? 0 : 1;
+      if (an !== bn) return an - bn;
+      return String(b.updatedAt).localeCompare(String(a.updatedAt));
+    });
+    const total = list.length;
+    return done({ items: list.slice(0, limit).map(itemView), total, limit });
+  }
+
+  async function upsertItem(input) {
+    if (!input || typeof input !== 'object') return fail('缺少物品字段');
+    const existing = input.id ? store.find('items', input.id) : null;
+    if (input.id && !existing) return fail(`物品 ${input.id} 不存在`);
+
+    const record = normalizeItem({
+      ...(existing || {}),
+      ...pick(input, ['name', 'location', 'detail', 'quantity', 'unit', 'category', 'note', 'tags', 'photoIds', 'source']),
+      // 「昨天」「3 天前」这类说法要按自然语言解析，不能直接喂给 toIso
+      placedAt: input.placedAt === undefined ? existing?.placedAt : toIso(parseWhen(input.placedAt)),
+      id: existing?.id,
+    });
+    if (!record.name) return fail('物品要有名字（写清楚是什么东西，比如「充电器」「备用钥匙」）');
+    if (!record.location && !record.detail) {
+      return fail('要记位置才能帮你找回来：告诉我大概放在哪（房间 / 柜子 / 抽屉都行）');
+    }
+    if (input.placedAt !== undefined && input.placedAt !== null && input.placedAt !== '' && !record.placedAt) {
+      return fail(`无法解析「${input.placedAt}」这个时间，可以用 2026-11-10、昨天、3 天前 这类说法`);
+    }
+    if (record.quantity !== null && record.quantity < 0) return fail('数量不能是负数');
+
+    // 照片：只认真正登记过的 id，顺便把归属标上，便于删物品时一起清理
+    const photoIds = [];
+    for (const id of record.photoIds) {
+      const photo = store.find('photos', id);
+      if (!photo) continue;
+      if (photo.itemId && photo.itemId !== record.id) continue;
+      if (photo.itemId !== record.id) store.patch('photos', photo.id, { itemId: record.id });
+      photoIds.push(id);
+    }
+    record.photoIds = photoIds;
+    // 从这条记录上摘掉的图要解绑，否则它既不属于任何物件、又因为「还挂在物件上」而删不掉
+    for (const photo of store.list('photos')) {
+      if (photo.itemId === record.id && !photoIds.includes(photo.id)) {
+        store.patch('photos', photo.id, { itemId: null });
+      }
+    }
+
+    const saved = store.put('items', record);
+    hooks?.onDataChanged?.('items');
+    return done({ record: itemView(store.find('items', saved.id)) });
+  }
+
+  /** 给已有物品挂照片（工具在写入前先落图，再走这里）。 */
+  async function attachPhotos(itemId, photoIds) {
+    const item = store.find('items', itemId);
+    if (!item) return fail(`物品 ${itemId} 不存在`);
+    const ids = Array.isArray(photoIds) ? photoIds : [photoIds];
+    const merged = [...new Set([...(item.photoIds || []), ...ids.filter((id) => store.find('photos', id))])].slice(0, 12);
+    for (const id of merged) {
+      const photo = store.find('photos', id);
+      if (photo && photo.itemId !== itemId) store.patch('photos', id, { itemId });
+    }
+    const saved = store.patch('items', itemId, { photoIds: merged });
+    hooks?.onDataChanged?.('items');
+    return done({ record: itemView(saved) });
+  }
+
+  async function removeItem(id) {
+    const item = store.find('items', id);
+    if (!item) return fail(`物品 ${id} 不存在`);
+    for (const photoId of item.photoIds || []) {
+      // 只删属于这条物件的照片；同一张图被多条引用时保留
+      const used = store.list('items').filter((other) => other.id !== id && (other.photoIds || []).includes(photoId));
+      if (!used.length) photos.remove(photoId);
+    }
+    store.remove('items', id);
+    hooks?.onDataChanged?.('items');
+    return done({ deleted: true, id });
+  }
+
+  /** 删掉一张没挂在任何物品上的照片（面板取消/换图时用）。已被引用就拒绝，避免把记录上的图删空。 */
+  async function removePhoto(id) {
+    const photo = store.find('photos', id);
+    if (!photo) return fail(`照片 ${id} 不存在`);
+    if (photo.itemId && store.find('items', photo.itemId)) {
+      const item = store.find('items', photo.itemId);
+      return fail(`这张照片还挂在「${item.name}」上，先从物件里移除再删`);
+    }
+    photos.remove(id);
+    hooks?.onDataChanged?.('items');
+    return done({ deleted: true, id });
+  }
+
   /* ------------------------------ 通用 ------------------------------ */
 
   function query(collection, options = {}) {
@@ -663,6 +794,7 @@ export function createService({ store, config, kinds, credentials, quota, remind
       case 'plans': return removePlan(id);
       case 'todos': return removeTodo(id);
       case 'debts': return removeDebt(id);
+      case 'items': return removeItem(id);
       default: return fail(`collection 必须是 ${COLLECTIONS.join(' / ')}`);
     }
   }
@@ -683,6 +815,7 @@ export function createService({ store, config, kinds, credentials, quota, remind
       if (collection === 'plans') return upsertPlan(payload);
       if (collection === 'todos') return upsertTodo(payload);
       if (collection === 'debts') return upsertDebt(payload);
+      if (collection === 'items') return upsertItem(payload);
     }
     return fail(`不支持的 op「${op}」`);
   }
@@ -812,10 +945,15 @@ export function createService({ store, config, kinds, credentials, quota, remind
     upsertPlan,
     upsertTodo,
     upsertDebt,
+    upsertItem,
+    attachPhotos,
+    removePhoto,
+    findItems,
     removeAsset,
     removePlan,
     removeTodo,
     removeDebt,
+    removeItem,
     setPlanCredential,
     setPlanWindows,
     refreshQuota,

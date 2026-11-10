@@ -18,13 +18,15 @@ import { nowIso, newId, pick, toIso, toNumber, safeText } from './util.js';
 
 export const SCHEMA_VERSION = 1;
 
-export const COLLECTIONS = ['assets', 'plans', 'todos', 'debts', 'snapshots', 'alerts', 'kinds', 'sources'];
+export const COLLECTIONS = ['assets', 'plans', 'todos', 'debts', 'items', 'photos', 'snapshots', 'alerts', 'kinds', 'sources'];
 
 const ID_PREFIX = {
   assets: 'asset',
   plans: 'plan',
   todos: 'todo',
   debts: 'debt',
+  items: 'item',
+  photos: 'ph',
   snapshots: 'snap',
   alerts: 'alert',
   kinds: 'kind',
@@ -40,6 +42,8 @@ function emptyData() {
     plans: [],
     todos: [],
     debts: [],
+    items: [],
+    photos: [],
     snapshots: [],
     alerts: [],
     kinds: [],
@@ -266,6 +270,40 @@ export function normalizeDebt(raw, defaults = {}) {
   };
 }
 
+/** 物品收纳：家里东西放哪儿了。photoIds 指向 photos 集合（图片字节存在数据目录里）。 */
+export function normalizeItem(raw) {
+  const photos = Array.isArray(raw.photoIds) ? raw.photoIds : Array.isArray(raw.photos) ? raw.photos : [];
+  const tags = Array.isArray(raw.tags) ? raw.tags : typeof raw.tags === 'string' ? String(raw.tags).split(/[,，\s]+/) : [];
+  return {
+    id: String(raw.id || newId(ID_PREFIX.items)),
+    name: safeText(raw.name, 120),
+    location: safeText(raw.location, 120),
+    detail: safeText(raw.detail, 120), // 柜子第几层、哪个抽屉这类补充
+    quantity: nullableNumber(raw.quantity),
+    unit: safeText(raw.unit, 20),
+    category: safeText(raw.category, 40),
+    note: safeText(raw.note, 2000),
+    tags: [...new Set(tags.map((t) => safeText(t, 24)).filter(Boolean))].slice(0, 20),
+    placedAt: toIso(raw.placedAt),
+    photoIds: [...new Set(photos.map((p) => safeText(p, 80)).filter(Boolean))].slice(0, 12),
+    source: safeText(raw.source || 'manual', 20),
+    createdAt: toIso(raw.createdAt) || nowIso(),
+    updatedAt: toIso(raw.updatedAt) || nowIso(),
+  };
+}
+
+/** 照片元数据；字节存 <dataDir>/photos/<file>，记录里只留路径与类型。 */
+export function normalizePhoto(raw) {
+  return {
+    id: String(raw.id || newId(ID_PREFIX.photos)),
+    file: safeText(raw.file, 120),
+    mime: safeText(raw.mime || 'image/jpeg', 40),
+    byteSize: nullableNumber(raw.byteSize),
+    itemId: raw.itemId ? String(raw.itemId) : null,
+    createdAt: toIso(raw.createdAt) || nowIso(),
+  };
+}
+
 export function normalizeAlert(raw, defaults = {}) {
   return {
     id: String(raw.id || newId(ID_PREFIX.alerts)),
@@ -322,6 +360,8 @@ const NORMALIZER = {
   plans: normalizePlan,
   todos: normalizeTodo,
   debts: normalizeDebt,
+  items: normalizeItem,
+  photos: normalizePhoto,
   alerts: normalizeAlert,
   kinds: normalizeKind,
   sources: normalizeSource,
@@ -492,6 +532,8 @@ export class Store {
       plans: this.data.plans,
       todos: this.data.todos,
       debts: this.data.debts,
+      items: this.data.items,
+      photos: this.data.photos,
       snapshots: this.data.snapshots,
       alerts: this.data.alerts,
       kinds: this.data.kinds,

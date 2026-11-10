@@ -12,6 +12,8 @@
  */
 
 const MAX_BODY = 256 * 1024;
+// 照片走 base64，8MB 的图编码后约 10.7MB；其它接口仍用 256KB，别为一张图放宽全部入口。
+const MAX_PHOTO_BODY = 12 * 1024 * 1024;
 
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]', '::1', '0:0:0:0:0:0:0:1']);
 
@@ -66,7 +68,7 @@ function originMatches(originHeader, allowed) {
   }
 }
 
-function readBody(req) {
+function readBody(req, limit = MAX_BODY) {
   return new Promise((resolve, reject) => {
     let size = 0;
     let aborted = false;
@@ -74,7 +76,7 @@ function readBody(req) {
     req.on('data', (chunk) => {
       if (aborted) return;
       size += chunk.length;
-      if (size > MAX_BODY) {
+      if (size > limit) {
         aborted = true;
         // 不要 destroy：那样客户端只会看到连接被重置。排空并回 413 更有用。
         try {
@@ -249,6 +251,29 @@ export function registerRoutes(ctx, service, helpers) {
       },
     },
     {
+      path: `${basePath}/api/photos`,
+      method: 'POST',
+      handler: (body) => {
+        if (!helpers.photos) return { status: 503, payload: { ok: false, error: '图片服务未就绪' } };
+        try {
+          const record = helpers.photos.saveDataUrl(body?.dataUrl);
+          return { ok: true, photo: helpers.photos.photoView(record), state: service.state() };
+        } catch (error) {
+          return { status: 400, payload: { ok: false, error: String(error?.message || error) } };
+        }
+      },
+    },
+    {
+      // 面板取消编辑 / 换图时把没挂上的图片一起删掉，别在数据目录里留孤儿
+      path: `${basePath}/api/photos/delete`,
+      method: 'POST',
+      handler: async (body) => {
+        const result = await service.removePhoto(body?.id);
+        if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
+        return { ok: true, ...result.data, state: service.state() };
+      },
+    },
+    {
       path: `${basePath}/api/health`,
       method: 'GET',
       handler: () => ({ ok: true, version: '0.1.0', storagePath: service.state().diagnostics.storagePath }),
@@ -291,6 +316,26 @@ export function registerRoutes(ctx, service, helpers) {
           }
 
           const url = new URL(req.url || '/', 'http://localhost');
+
+          // 照片是二进制，单独走一条前缀路由（只读，且必须是本次会话能访问到的本机请求）
+          const photoPrefix = `${basePath}/api/photo/`;
+          if (url.pathname.startsWith(photoPrefix)) {
+            if (req.method !== 'GET' && req.method !== 'HEAD') {
+              res.setHeader?.('allow', 'GET');
+              return send(res, 405, { ok: false, error: '只支持 GET' });
+            }
+            const photoId = decodeURIComponent(url.pathname.slice(photoPrefix.length));
+            const found = helpers.photos?.read(photoId);
+            if (!found) return send(res, 404, { ok: false, error: '图片不存在' });
+            res.statusCode = 200;
+            res.setHeader('content-type', found.mime);
+            res.setHeader('content-length', found.buffer.length);
+            res.setHeader('cache-control', 'private, max-age=3600');
+            res.setHeader('x-content-type-options', 'nosniff');
+            res.end(found.buffer);
+            return;
+          }
+
           const route = table.get(url.pathname);
           if (!route) return send(res, 404, { ok: false, error: `未知接口 ${url.pathname}` });
           if (req.method !== route.method) {
@@ -305,13 +350,21 @@ export function registerRoutes(ctx, service, helpers) {
             if (!contentType.includes('application/json')) {
               return send(res, 415, { ok: false, error: '只接受 application/json' });
             }
-            body = await readBody(req);
+            body = await readBody(req, url.pathname === `${basePath}/api/photos` ? MAX_PHOTO_BODY : MAX_BODY);
           } else if (Number(headerValue(req, 'content-length') || 0) > 0) {
             return send(res, 400, { ok: false, error: 'GET 请求不要带 body' });
           }
           const query = Object.fromEntries(url.searchParams.entries());
           const result = await route.handler(body || {}, query);
-          if (result && result.status && result.payload) return send(res, result.status, result.payload);
+          if (result && result.status && result.payload) {
+            // service 方法可能是 async：漏了 await 时 error 会是 undefined，回给面板就成了空失败
+            const payload = result.payload;
+            if (payload && payload.ok === false && !payload.error) {
+              logger?.warn?.(`[butler] ${url.pathname} 返回了失败但没有原因`);
+              return send(res, result.status, { ok: false, error: '操作失败（没有拿到失败原因）' });
+            }
+            return send(res, result.status, payload);
+          }
           return send(res, 200, result);
         } catch (error) {
           const message = String(error?.message || error);
