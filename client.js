@@ -3421,6 +3421,14 @@
         return photo && photo.url ? photo.url : '';
       }
 
+      /** ISO（UTC）→ 输入框用的本地时间字符串；解析不了就原样给。 */
+      function localInput(value) {
+        var date = toDate(value);
+        if (!date) return '';
+        return date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate())
+          + ' ' + pad(date.getHours()) + ':' + pad(date.getMinutes());
+      }
+
       /** 照片选择条：可看大图、可删、可加。 */
       function PhotoPicker(props) {
         var photos = props.photos || [];
@@ -3503,7 +3511,8 @@
                   detail: item.detail || '',
                   quantity: item.quantity === null || item.quantity === undefined ? '' : String(item.quantity),
                   unit: item.unit || '',
-                  placedAt: item.placedAt ? item.placedAt.slice(0, 16).replace('T', ' ') : '',
+                  // 输入框里显示本地时间：直接 slice ISO 会显示 UTC，保存时又被当成本地时间解析（每次 -8h）
+                  placedAt: item.placedAt ? localInput(item.placedAt) : '',
                   note: item.note || '',
                   tags: (item.tags || []).join(' ')
                 });
