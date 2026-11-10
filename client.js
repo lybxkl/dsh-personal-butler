@@ -744,7 +744,26 @@
         var unit = String(window.unit || '');
         if (unit === 'percent') return Math.max(0, Math.round(Number(remain))) + '%';
         if (unit === 'usd') return '$' + fmtNumber(remain);
+        if (unit === 'cny') return '¥' + fmtNumber(remain);
         return fmtNumber(remain);
+      }
+
+      /** 只有余额、没有总额度的窗口（DeepSeek 余额等）：显示「还剩多少」，不显示百分比 */
+      function isBalanceWindow(window) {
+        if (!window) return false;
+        if (window.kind === 'balance') return true;
+        return window.limit === null || window.limit === undefined || window.percent === null || window.percent === undefined;
+      }
+
+      function balanceLabel(window) {
+        var value = window.remaining;
+        if (value === undefined || value === null) value = window.used;
+        if (value === undefined || value === null || !Number.isFinite(Number(value))) return '—';
+        var unit = String(window.unit || '');
+        if (unit === 'usd') return '$' + fmtNumber(value);
+        if (unit === 'cny') return '¥' + fmtNumber(value);
+        if (unit === 'percent') return Math.max(0, Math.round(Number(value))) + '%';
+        return fmtNumber(value);
       }
 
       /* ------------------------------------------------------------------ *
@@ -1857,6 +1876,33 @@
                 { className: 'btl-plan-windows' },
                 windows.map(function (window) {
                   var tone = toneOfLevel(window.level);
+                  // 余额型窗口没有「用了百分之几」这个语义，画进度条会显示成「已用 0%」——那是假信息
+                  if (isBalanceWindow(window)) {
+                    return h(
+                      'div',
+                      { className: 'btl-window btl-window-balance', key: window.key },
+                      h(
+                        'div',
+                        { className: 'btl-window-head' },
+                        h('span', { className: 'btl-window-label' }, window.label),
+                        h(
+                          'span',
+                          {
+                            className: 'btl-window-value btl-balance-value' + (tone ? ' btl-tone-' + tone : '')
+                          },
+                          balanceLabel(window)
+                        )
+                      ),
+                      window.resetAt
+                        ? h(
+                            'div',
+                            { className: 'btl-window-foot' },
+                            h('span', null, t('plans.reset') + ' ' + fmtDate(window.resetAt, true)),
+                            h('span', null, '')
+                          )
+                        : null
+                    );
+                  }
                   var usedText = t('plans.used', { v: percentLabel(window.percent) });
                   return h(
                     'div',
@@ -3120,6 +3166,9 @@
         '.btl-window-label{color:var(--dsw-alias-label-secondary)}',
         '.btl-window-value{font-variant-numeric:tabular-nums;font-weight:500}',
         '.btl-window-foot{display:flex;align-items:baseline;justify-content:space-between;gap:8px;font-size:11px;color:var(--dsw-alias-label-secondary);margin-top:4px;flex-wrap:wrap}',
+        '.btl-window-balance{padding:8px 10px;border-radius:calc(var(--btl-radius) - 2px);background:var(--dsw-alias-bg-layer-2)}',
+        '.btl-window-balance .btl-window-head{margin-bottom:0;font-size:12.5px}',
+        '.btl-balance-value{font-size:15px;font-weight:620}',
         '.btl-bar{height:5px;border-radius:999px;overflow:hidden;background:color-mix(in srgb, var(--dsw-alias-label-secondary) 20%, transparent)}',
         '.btl-bar-fill{display:block;height:100%;border-radius:999px;background:var(--dsw-alias-brand-primary);transition:width .3s ease}',
         '.btl-bar-ok .btl-bar-fill{background:var(--dsw-alias-state-success-primary)}',

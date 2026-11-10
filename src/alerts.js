@@ -163,12 +163,30 @@ export function createAlerts({ store, config, logger }) {
     for (const plan of store.list('plans')) {
       const thresholds = plan.thresholds || { warn: 0.8, critical: 0.95 };
       let worst = null;
+      let empty = null;
       for (const win of plan.windows || []) {
+        // 余额型窗口没有「用了百分之几」，只有「还剩多少」：用完（<=0）才提醒
+        if (win.limit === null || win.percent === null) {
+          const left = Number(win.remaining);
+          if (Number.isFinite(left) && left <= 0 && !empty) empty = win;
+          continue;
+        }
         const percent = Number(win.percent);
         if (!Number.isFinite(percent)) continue;
         const level = percent >= thresholds.critical ? 'critical' : percent >= thresholds.warn ? 'warn' : null;
         if (!level) continue;
         if (!worst || LEVEL_RANK[level] > LEVEL_RANK[worst.level]) worst = { level, win, percent };
+      }
+      if (empty) {
+        add({
+          dedupeKey: `plan:${plan.id}:${empty.key}`,
+          itemKind: 'plan',
+          itemId: plan.id,
+          level: 'critical',
+          title: '余额已用完',
+          message: `${plan.name} · ${empty.label} 已无可用余额，需要充值或换额度`,
+          at: nowIso(),
+        });
       }
       if (worst) {
         add({

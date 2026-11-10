@@ -107,13 +107,21 @@ export function createService({ store, config, kinds, credentials, quota, remind
     const thresholds = plan.thresholds || { warn: 0.8, critical: 0.95 };
     const windows = (plan.windows || []).map((win) => {
       const percent = Number(win.percent);
+      // 只有余额、没有总额度的窗口（DeepSeek 余额、自定义源只报余额）没有「用了百分之几」
+      // 这个语义，硬套百分比会显示成「已用 0%」——那是假信息，面板按余额单独渲染。
+      const isBalance = win.limit === null || win.percent === null;
       let level = 'ok';
-      if (Number.isFinite(percent)) {
+      if (isBalance) {
+        if (win.remaining !== null && Number.isFinite(Number(win.remaining)) && Number(win.remaining) <= 0) {
+          level = 'critical';
+        }
+      } else if (Number.isFinite(percent)) {
         if (percent >= thresholds.critical) level = 'critical';
         else if (percent >= thresholds.warn) level = 'warn';
       }
       return {
         ...win,
+        kind: isBalance ? 'balance' : 'ratio',
         level,
         resetLabel: win.resetAt ? humanDelta(win.resetAt) : null,
       };

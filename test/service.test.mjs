@@ -254,3 +254,27 @@ test('诊断信息齐全（面板要用来排错）', () => {
   }
   assert.equal(typeof d.storagePath, 'string');
 });
+test('计划视图：余额型窗口标成 balance，不再算「已用百分比」', async () => {
+  const { service } = makeService();
+  const created = await service.upsertPlan({ name: 'DeepSeek 余额', sourceId: 'manual' });
+  const id = created.data.record.id;
+  await service.setPlanWindows(id, [
+    { key: 'balance', label: '账户余额（CNY）', limit: null, used: null, remaining: 190.32, unit: 'cny', percent: null },
+    { key: 'month', label: '本月额度', limit: 100, used: 88, remaining: 12, unit: 'percent', percent: 0.88 },
+  ]);
+
+  const plan = service.state().plans.find((p) => p.id === id);
+  const balance = plan.windows.find((w) => w.key === 'balance');
+  const month = plan.windows.find((w) => w.key === 'month');
+  assert.equal(balance.kind, 'balance');
+  assert.equal(balance.level, 'ok');
+  assert.equal(balance.percent, null);
+  assert.equal(month.kind, 'ratio');
+  assert.equal(month.level, 'warn');
+
+  // 余额见底 → critical，但不是靠 percent 判出来的
+  await service.setPlanWindows(id, [{ key: 'balance', label: '账户余额（CNY）', remaining: 0, unit: 'cny', limit: null, used: null, percent: null }]);
+  const empty = service.state().plans.find((p) => p.id === id).windows[0];
+  assert.equal(empty.kind, 'balance');
+  assert.equal(empty.level, 'critical');
+});

@@ -173,7 +173,7 @@ export function normalizeWindow(raw) {
     limit,
     used,
     remaining,
-    unit: ['requests', 'usd', 'tokens', 'percent', 'calls', 'credits'].includes(raw.unit) ? raw.unit : 'requests',
+    unit: ['requests', 'usd', 'cny', 'tokens', 'percent', 'calls', 'credits'].includes(raw.unit) ? raw.unit : 'requests',
     percent,
     resetAt: toIso(raw.resetAt),
   };

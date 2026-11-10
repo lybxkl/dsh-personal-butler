@@ -170,7 +170,7 @@ export const BUILTIN_SOURCES = {
         key: 'balance',
         label: `账户余额（${info.currency || 'CNY'}）`,
         remaining: toNumber(info.total_balance, 0),
-        unit: String(info.currency || '').toUpperCase() === 'USD' ? 'usd' : 'credits',
+        unit: String(info.currency || '').toUpperCase() === 'USD' ? 'usd' : 'cny',
         limit: null,
         used: null,
         percent: null,

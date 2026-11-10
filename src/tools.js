@@ -302,7 +302,9 @@ export function registerTools(ctx, service, helpers) {
         if (item.status === 'manual') return `- ${label}：手动源，没有自动窗口`;
         if (item.status !== 'ok') return `- ${label}：失败 ${item.error || '未知错误'}`;
         const wins = (item.windows || [])
-          .map((w) => `${w.label} ${w.percent === null || w.percent === undefined ? '—' : Math.round(w.percent * 100) + '%'}`)
+          .map((w) => (w.percent === null || w.percent === undefined
+            ? `${w.label} 余额 ${w.remaining ?? w.used ?? '—'}`
+            : `${w.label} ${Math.round(w.percent * 100)}%`))
           .join('；');
         return `- ${label}：${wins || '无窗口数据'}`;
       });
@@ -376,8 +378,13 @@ export function registerTools(ctx, service, helpers) {
       if (!result.ok) return result;
       const data = result.data;
       const winLines = data.windows.map((w) => {
-        const pct = w.percent === null || w.percent === undefined ? '—' : `${Math.round(w.percent * 100)}%`;
         const reset = w.resetAt ? `，重置 ${fmtLocal(w.resetAt)}（${humanDelta(w.resetAt)}）` : '，重置时间未知';
+        // 只有余额没有总额度的窗口（DeepSeek 余额等）没有百分比，硬写「已用 —」是假信息
+        if (w.percent === null || w.percent === undefined) {
+          const left = w.remaining === null || w.remaining === undefined ? '—' : w.remaining;
+          return `- ${w.label}：剩余 ${left}${w.unit ? '（' + w.unit + '）' : ''}${reset}`;
+        }
+        const pct = `${Math.round(w.percent * 100)}%`;
         const left = w.remaining === null || w.remaining === undefined ? '' : `，剩余 ${w.remaining}`;
         return `- ${w.label}：已用 ${pct}${left}${reset}`;
       });

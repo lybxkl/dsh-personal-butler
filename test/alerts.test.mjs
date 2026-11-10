@@ -127,3 +127,24 @@ test('提醒：窗口外的记录不生成提醒', () => {
   alerts.recompute();
   assert.equal(store.list('alerts').length, 0);
 });
+test('提醒：余额型窗口只有用完才提醒，且不显示百分比', () => {
+  const { store, alerts } = makeEnv();
+  const plan = store.put('plans', {
+    name: 'DeepSeek',
+    sourceId: 'deepseek',
+    status: 'ok',
+    windows: [{ key: 'balance', label: '账户余额（CNY）', limit: null, used: null, remaining: 190.32, unit: 'cny', percent: null }],
+  });
+  alerts.recompute();
+  assert.equal(store.list('alerts').length, 0, '还有余额时不该提醒');
+
+  store.patch('plans', plan.id, {
+    windows: [{ key: 'balance', label: '账户余额（CNY）', limit: null, used: null, remaining: 0, unit: 'cny', percent: null }],
+  });
+  alerts.recompute();
+  const list = store.list('alerts');
+  assert.equal(list.length, 1);
+  assert.equal(list[0].level, 'critical');
+  assert.match(list[0].title, /余额/);
+  assert.match(list[0].message, /充值|余额/);
+});
