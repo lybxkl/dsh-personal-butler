@@ -4,6 +4,8 @@
 
 ![管家面板](docs/panel-light.png)
 
+<sub>上图是面板的资产页：四张汇总卡 + 按到期排序的订阅（宽屏两列，标题最多两行）+ 额度卡片（5 小时 / 周 / 月三条进度条，余额型直接显示余额）。深色模式见 [docs/panel-dark.png](docs/panel-dark.png)。</sub>
+
 | 你发的截图 | 管家记成 | 之后会发生什么 |
 |---|---|---|
 | 软件订阅页（名称 / 金额 / 到期时间） | **资产** | 面板按到期排序，到期前提醒你 |
@@ -162,7 +164,7 @@
 
 ```bash
 node --check client.js
-npm test          # node --test "test/*.test.mjs"，101 例
+npm test          # node --test "test/*.test.mjs"，107 例
 ```
 
 目录：`index.js`（Host 装配）· `client.js`（侧栏面板）· `src/`（存储/额度/提醒/路由/工具/提示词）· `cordis.patch.yml`（插件行与默认配置）· `locale/`、`icon.svg`、`docs/`（截图）。
