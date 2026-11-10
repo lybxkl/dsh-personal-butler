@@ -1779,8 +1779,8 @@
             },
             h(
               'span',
-              { className: 'btl-item-title' },
-              asset.name,
+              { className: 'btl-item-title btl-item-title-clamp' },
+              h('span', { className: 'btl-item-name' }, asset.name),
               asset.autoRenew ? h(Chip, { tone: 'muted' }, t('badge.autoRenew')) : null
             ),
             h(
@@ -3081,8 +3081,10 @@
 
         '.btl-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}',
         // 记录型列表（资产、借贷）在宽屏下两列排，一篇空白比一行一条省一半纵向空间
-        '.btl-list-grid{display:grid;grid-template-columns:1fr;gap:6px;align-items:start}',
+        '.btl-list-grid{display:grid;grid-template-columns:1fr;gap:6px;align-items:stretch}',
         '.btl-list-grid > li{min-width:0}',
+        // 正在就地编辑的那一条横跨整行，表单不会被挤成半屏，也不会把同排邻居撑高
+        '.btl-list-grid > li.btl-item-editing{grid-column:1/-1}',
         '@media (min-width:1040px){.btl-list-grid{grid-template-columns:repeat(auto-fill,minmax(340px,1fr))}}',
         '.btl-item{display:flex;align-items:center;gap:11px;padding:10px 12px;border-radius:10px;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);transition:border-color .14s, background .14s}',
         '.btl-item-click,.btl-item-clickable{cursor:pointer}',
@@ -3096,6 +3098,9 @@
         '.btl-item-mark[data-tone="ok"]{color:var(--dsw-alias-state-success-primary);background:color-mix(in srgb, var(--dsw-alias-state-success-primary) 14%, transparent)}',
         '.btl-item-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}',
         '.btl-item-title{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0;overflow-wrap:anywhere;font-size:13.5px;font-weight:500;color:var(--dsw-alias-label-primary)}',
+        // 卡片标题：最多两行，超出用省略号，卡片高度因此可预测
+        '.btl-item-title-clamp{align-items:flex-start;flex-wrap:nowrap}',
+        '.btl-item-name{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere;min-width:0;flex:1}',
         '.btl-item-meta{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;color:var(--dsw-alias-label-secondary)}',
         '.btl-item-note{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:360px}',
         '.btl-item-amount{font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary);font-weight:500}',
