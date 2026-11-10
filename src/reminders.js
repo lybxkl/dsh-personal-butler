@@ -7,7 +7,7 @@
  * 能看到并手动干预每一条提醒。
  *
  * 加强提醒的实现：到点那条任务的 prompt 指示目标会话的 Agent 立刻用
- * ask_user_question 弹出选择卡，用户必须表态才会继续（而不是一条容易被忽略的消息）。
+ * butler_ask 发一组编号选项（纯文字，QQ / 微信也能回），用户必须表态才会继续。
  */
 
 import { fmtLocal, humanDelta, minutesBetween, safeText, toIso } from './util.js';
@@ -16,7 +16,7 @@ const MIN_DELAY_SECONDS = 1;
 const MIN_USEFUL_MS = 2000;
 // 提醒正文改过之后，老任务必须重建（否则已排期的任务还挂着旧文案、旧工具名）。
 // 改动提醒文案时把这个版本号 +1，下次 syncAll 会自动重建一遍。
-const PROMPT_VERSION = 3;
+const PROMPT_VERSION = 4;
 
 /** schedule.create 的 timing 入参在不同版本里可能是 at/scheduledAt 或 after_seconds，按顺序试一次并记住可用形状。 */
 const TIMING_SHAPES = ['at', 'scheduledAt', 'atMs', 'afterSnake', 'afterCamel'];
@@ -179,7 +179,7 @@ export function createReminders({ store, config, logger, getSchedule, onChange }
         '请依次做三件事，不要复述这条消息的措辞：',
         `1. 先用 butler_query 读一次这条记录的最新状态（collection=${collection}，id=${record.id}），确认它还没被处理；`,
         '2. 用 butler_ask 建一条待确认：question 写「这条要不要现在处理？」，options 给 [现在就处理, 稍后再提醒 10 分钟, 推迟到今晚, 已经处理完了]；',
-        '   把它返回的 text 原样发给用户 —— 这段带 1/2/3 编号，用户在 QQ / 手机上直接回数字也能对上；能弹卡片就顺手弹一张，但文字必须有。',
+        '   把它返回的 text 原样发给用户 —— 这段带 1/2/3 编号，用户在 QQ / 手机上直接回数字也能对上。不要用 ask_user_question，聊天通道看不到卡片会卡住。',
         `3. 用户回数字后先 butler_pending_resolve 处理，再按结果更新记录${actionHint}；不要自作主张改动金额与时间。`,
       ].join('\n');
     }
@@ -187,7 +187,7 @@ export function createReminders({ store, config, logger, getSchedule, onChange }
     return [
       `[管家到点提醒·加强] ${describeItem(collection, record)} 已经到时间：${due}（${delta}）。`,
       '这是到点提醒：用 butler_ask 建一条待确认（options 给 [已处理完, 我这就去, 延后 10 分钟, 延后到明天]），把返回的 text 原样发给用户。',
-      '如果当前通道能弹卡片，可以同时弹一张 ask_user_question；但必须带 1/2/3 编号文字 —— 只弹卡片、用户在手机上点不到就等于没提醒。',
+      '不要用 ask_user_question（QQ / 微信看不到，会卡住整轮）；编号文字就是提醒本体。',
       `用户回数字后先 butler_pending_resolve，再按结果更新记录（collection=${collection}，id=${record.id}）${actionHint}；如果延后，把新的 dueAt 设置好，本插件会自动重建下一条提醒。`,
     ].join('\n');
   }

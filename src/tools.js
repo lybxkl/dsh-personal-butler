@@ -690,7 +690,8 @@ export function registerTools(ctx, service, helpers) {
       + '你用 butler_pending_resolve 就能对上同一条，不依赖卡片。'
       + '需要确认后直接落库（记资产/待办/借贷、改时间）时，把 collection + op + record（JSON 字符串）一起带上，'
       + '并把第一个选项（也就是「就按这个记」）设成 applies:true —— 用户回 1 就直接写入。'
-      + '用法：先 butler_ask 拿到 text，再把 text 原样回复给用户（不要自己重排编号）。',
+      + '用法：先 butler_ask 拿到 text，再把 text 原样回复给用户（不要自己重排编号）。'
+      + '不要改用 ask_user_question：QQ / 微信看不到卡片，用户不回答就会把整轮卡住。',
     parameters: {
       question: { type: 'string', required: true, description: '要问用户的话，一句话说清（如「这笔订阅记成这样对吗？」）' },
       options: { type: 'array', description: '选项数组，2~8 个；字符串如 ["对，就这样记","金额不对","日期不对"]，也可以是对象 {"label":"…","applies":true}' },
