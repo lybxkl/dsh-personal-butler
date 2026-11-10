@@ -1,0 +1,528 @@
+/**
+ * 模型工具（butler_*）。
+ *
+ * 每个工具都是 service 的薄封装：语义、校验、失败原因与面板 HTTP 路由完全一致
+ * （插件规范：一个操作两个调用方，结果必须对得上）。
+ */
+
+import { defineTool } from '@deepseek-ai/dsh-tools';
+import { fmtLocal, humanDelta, jsonSafe } from './util.js';
+
+function text(value, fallback = '完成') {
+  if (!value || value.ok !== true) {
+    const message = value?.error || fallback;
+    return [{ type: 'text', text: `操作失败：${message}` }];
+  }
+  return [{ type: 'text', text: value.text || fallback }];
+}
+
+const COLLECTION_LABEL = { assets: '资产', plans: '额度计划', todos: '待办', debts: '借贷' };
+
+/** 把 reminder 记录的内部形状翻译成人话（syncItem 写的是任务 id，不是 state 字段）。 */
+function describeReminder(reminder) {
+  if (!reminder) return '未排程（没有提醒时间）';
+  const tasks = [reminder.advanceTaskId, reminder.dueTaskId].filter(Boolean);
+  if (!tasks.length) return reminder.reason || '未排程（没有建出提醒任务）';
+  return tasks.length > 1
+    ? `已排入日程（提前提醒 + 到点提醒，共 ${tasks.length} 条任务）`
+    : '已排入日程（1 条提醒任务）';
+}
+
+
+export function registerTools(ctx, service, helpers) {
+  const { logger } = helpers;
+  const disposers = [];
+
+  function register(definition) {
+    const execute = definition?.execute;
+    const candidate =
+      typeof execute === 'function'
+        ? {
+            ...definition,
+            async execute(args, exec) {
+              return jsonSafe(await execute.call(this, args, exec));
+            },
+          }
+        : definition;
+    try {
+      const dispose = ctx.tools.register(candidate);
+      disposers.push(dispose);
+      return dispose;
+    } catch (error) {
+      const message = String(error?.message || error);
+      if (/duplicate/i.test(message)) {
+        logger?.warn?.(`[butler] 工具 ${definition.name} 已存在，跳过重复注册`);
+        return () => {};
+      }
+      logger?.error?.(`[butler] 注册工具 ${definition.name} 失败：${message}`);
+      return () => {};
+    }
+  }
+
+  /* ---------------------------- 只读 ---------------------------- */
+
+  register(defineTool({
+    name: 'butler_overview',
+    description:
+      '查看私人管家当前全貌：资产（订阅/到期时间）、额度监控（各窗口用量与重置时间）、待办、借贷、未确认提醒。'
+      + '在用户发来截图并做任何写入前，先调它了解已有记录，避免重复录入。',
+    parameters: {
+      detail: { type: 'boolean', description: '是否附带每类记录的 id 与明细行（默认 true）' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => text(value, '已获取管家全貌') },
+    async execute(args) {
+      const summary = service.summary();
+      const state = service.state();
+      return {
+        ok: true,
+        text: summary.text,
+        counts: summary.counts,
+        subscriptionTotals: state.summary.subscriptionTotals,
+        debtTotals: state.summary.debtTotals,
+        diagnostics: state.diagnostics,
+      };
+    },
+  }));
+
+  register(defineTool({
+    name: 'butler_query',
+    description: '按集合查询私人管家的明细记录：assets（资产/订阅）、plans（额度计划）、todos（待办）、debts（借贷）。',
+    parameters: {
+      collection: { type: 'string', required: true, description: 'assets | plans | todos | debts' },
+      id: { type: 'string', description: '指定记录 id 时只返回这一条' },
+      status: { type: 'string', description: '按状态过滤，如 pending / done / open / settled / ok / error' },
+      kind: { type: 'string', description: '仅 assets 有效：按资产种类过滤，如 subscription、token_plan' },
+      limit: { type: 'number', description: '最多返回几条，默认 50，上限 500' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => text(value) },
+    async execute(args) {
+      const result = service.query(args.collection, args);
+      if (!result.ok) return result;
+      const label = COLLECTION_LABEL[args.collection] || args.collection;
+      const lines = result.data.items.map((item) => `- ${JSON.stringify(item)}`);
+      return {
+        ok: true,
+        text: `${label} 共 ${result.data.total} 条${result.data.total > result.data.items.length ? `（显示前 ${result.data.items.length} 条）` : ''}\n${lines.join('\n') || '- （无）'}`,
+        ...result.data,
+      };
+    },
+  }));
+
+  /* ---------------------------- 写入 ---------------------------- */
+
+  register(defineTool({
+    name: 'butler_asset_save',
+    description:
+      '新增或更新一项资产（软件订阅、会员、Token 套餐等）。传 id 表示更新，不传表示新增。'
+      + '写入前必须已经和用户确认过名称/金额/到期时间/周期。',
+    parameters: {
+      id: { type: 'string', description: '要更新的资产 id；新增时留空' },
+      name: { type: 'string', required: true, description: '资产名称，如 Claude Pro、腾讯视频会员' },
+      vendor: { type: 'string', description: '提供方/厂商，如 Anthropic、腾讯' },
+      amount: { type: 'number', description: '每个周期的金额，如 20' },
+      currency: { type: 'string', description: '币种，如 CNY、USD；留空用配置默认' },
+      cycle: { type: 'string', description: '计费周期：monthly | quarterly | yearly | weekly | once' },
+      kind: { type: 'string', description: '资产种类：subscription（默认）| token_plan | 其他已注册种类' },
+      expiresAt: { type: 'string', description: '到期/下次续费时间，支持 2026-12-10、2026-12-10 18:00、明天 9点 等' },
+      autoRenew: { type: 'boolean', description: '是否自动续费' },
+      notes: { type: 'string', description: '备注' },
+      source: { type: 'string', description: '来源：screenshot | manual | model' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => text(value) },
+    async execute(args) {
+      const result = await service.upsertAsset(args);
+      if (!result.ok) return result;
+      const record = result.data.record;
+      return {
+        ok: true,
+        text: `已记录资产：${record.name}（${record.id}）· ${record.amount} ${record.currency}/${record.cycle}`
+          + `${record.expiresAt ? ` · 到期 ${record.expiresAt}` : ''}`
+          + (result.data.kindAutoRegistered ? `\n注意：种类「${record.kind}」是新建的，已加入资产种类列表。` : ''),
+        record,
+        kindAutoRegistered: result.data.kindAutoRegistered,
+      };
+    },
+  }));
+
+  register(defineTool({
+    name: 'butler_plan_save',
+    description:
+      '新增或更新一个额度监控计划（Token 套餐的用量看板）。凭证本身不在这里传——用 butler_credential_set。'
+      + 'sourceId 决定用哪个内置适配器：claude-usage、deepseek、openai、generic（自定义 HTTP）、manual（只手动填）。',
+    parameters: {
+      id: { type: 'string', description: '要更新的计划 id；新增时留空' },
+      name: { type: 'string', required: true, description: '计划名称，如 Claude Pro 额度' },
+      sourceId: { type: 'string', description: '额度源：claude-usage | deepseek | openai | generic | manual' },
+      assetId: { type: 'string', description: '关联的资产 id（该套餐对应的订阅资产）' },
+      planLabel: { type: 'string', description: '套餐档位说明，如 Pro / Max 20x' },
+      thresholdsWarn: { type: 'number', description: '告警阈值，0~1，默认 0.8' },
+      thresholdsCritical: { type: 'number', description: '严重阈值，0~1，默认 0.95' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => text(value) },
+    async execute(args) {
+      const result = await service.upsertPlan({
+        id: args.id,
+        name: args.name,
+        sourceId: args.sourceId,
+        assetId: args.assetId,
+        planLabel: args.planLabel,
+        thresholds: {
+          ...(args.thresholdsWarn === undefined ? {} : { warn: args.thresholdsWarn }),
+          ...(args.thresholdsCritical === undefined ? {} : { critical: args.thresholdsCritical }),
+        },
+      });
+      if (!result.ok) return result;
+      const record = result.data.record;
+      return {
+        ok: true,
+        text: `已建立额度计划：${record.name}（${record.id}）· 来源 ${record.sourceId}`
+          + `\n凭证状态：${record.hasCredential ? '已配置' : '未配置'}`
+          + `\n提示：${result.data.credentialHint}`,
+        record,
+        credentialHint: result.data.credentialHint,
+      };
+    },
+  }));
+
+  register(defineTool({
+    name: 'butler_todo_save',
+    description:
+      '新增或更新一条待办。direction=awaiting_me 表示我要做的事；waiting_other 表示我在等别人。'
+      + 'dueAt 同时是提醒时间：管家会在提前 advanceMinutes 分钟提醒一次，到点再加强提醒一次。'
+      + '提醒时间必须先和用户确认。',
+    parameters: {
+      id: { type: 'string', description: '要更新的待办 id；新增时留空' },
+      title: { type: 'string', required: true, description: '待办标题（一句话说明要做什么）' },
+      detail: { type: 'string', description: '补充细节、原话、来源' },
+      direction: { type: 'string', description: 'awaiting_me（默认，我要做）| waiting_other（我在等对方）' },
+      counterpart: { type: 'string', description: '对方是谁（如 张三、老板）' },
+      dueAt: { type: 'string', description: '到期/提醒时间，支持 明天 9:00、2026-11-11 09:00、+2h' },
+      priority: { type: 'string', description: 'low | normal | high' },
+      status: { type: 'string', description: 'pending（默认）| done | cancelled' },
+      advanceMinutes: { type: 'number', description: '提前多少分钟提醒，默认取配置值' },
+      confirmed: { type: 'boolean', description: '是否已和用户确认过提醒时间' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => text(value) },
+    async execute(args) {
+      const result = await service.upsertTodo({ ...args, source: args.source || 'model' });
+      if (!result.ok) return result;
+      const record = result.data.record;
+      const what = record.direction === 'waiting_other' ? `等 ${record.counterpart || '对方'} 回应` : '我要做';
+      return {
+        ok: true,
+        text: `已记录待办：${record.title}（${record.id}）· ${what}`
+          + `${record.dueAt ? ` · 提醒 ${fmtLocal(record.dueAt)}（${humanDelta(record.dueAt)}）` : ' · 未定提醒时间'}`
+          + `\n提醒状态：${describeReminder(record.reminder)}`,
+        record,
+      };
+    },
+  }));
+
+  register(defineTool({
+    name: 'butler_debt_save',
+    description:
+      '新增或更新一笔借贷。direction=owedToMe 表示别人欠我；iOwe 表示我欠别人。'
+      + '有约定归还时间时填 dueAt，管家会在提前几天和到期时提醒。',
+    parameters: {
+      id: { type: 'string', description: '要更新的借贷 id；新增时留空' },
+      counterpart: { type: 'string', required: true, description: '对方姓名' },
+      direction: { type: 'string', description: 'owedToMe（默认，别人欠我）| iOwe（我欠别人）' },
+      amount: { type: 'number', description: '金额，必须大于 0' },
+      currency: { type: 'string', description: '币种，默认取配置' },
+      dueAt: { type: 'string', description: '约定归还时间' },
+      status: { type: 'string', description: 'open（默认）| settled（已结清）' },
+      note: { type: 'string', description: '备注、原话、凭证来源' },
+      advanceMinutes: { type: 'number', description: '提前多少分钟提醒' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => text(value) },
+    async execute(args) {
+      const result = await service.upsertDebt({ ...args, source: args.source || 'model' });
+      if (!result.ok) return result;
+      const record = result.data.record;
+      const who = record.direction === 'owedToMe' ? `${record.counterpart} 欠我` : `我欠 ${record.counterpart}`;
+      return {
+        ok: true,
+        text: `已记录借贷：${who} ${record.amount} ${record.currency}（${record.id}）`
+          + ` · ${record.status === 'settled' ? '已结清' : record.dueAt ? `约定 ${record.dueAt} 归还` : '未约定归还时间'}`,
+        record,
+      };
+    },
+  }));
+
+  register(defineTool({
+    name: 'butler_delete',
+    description: '删除一条管家记录（资产/额度计划/待办/借贷）。删除前应和用户确认。',
+    parameters: {
+      collection: { type: 'string', required: true, description: 'assets | plans | todos | debts' },
+      id: { type: 'string', required: true, description: '记录 id' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => text(value) },
+    async execute(args) {
+      const result = await service.removeRecord(args.collection, args.id);
+      if (!result.ok) return result;
+      return { ok: true, text: `已删除 ${COLLECTION_LABEL[args.collection] || args.collection} 记录 ${args.id}`, ...result.data };
+    },
+  }));
+
+  /* ---------------------------- 额度 ---------------------------- */
+
+  register(defineTool({
+    name: 'butler_credential_set',
+    description:
+      '保存某个额度计划访问第三方官网用量接口的凭证（API key / 官网 cookie / OAuth token，视平台而定）。'
+      + '注意：这不是 DSH 的模型配置，二者互不复用。凭证会落盘到宿主 credentials，不出现在配置文件和面板上。'
+      + '**建议优先引导用户在「管家设置」面板里自己填，避免凭证出现在会话记录里**；只有用户明确要求你代填时才调用。',
+    parameters: {
+      planId: { type: 'string', required: true, description: '额度计划 id' },
+      credential: { type: 'string', required: true, description: '凭证原文（key/cookie/token）' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => text(value) },
+    async execute(args) {
+      const result = service.setPlanCredential(args.planId, args.credential);
+      if (!result.ok) return result;
+      return { ok: true, text: `凭证已保存到计划的 credentials 记录（计划 ${args.planId}）。建议紧接着调 butler_quota_refresh 验证是否可用。`, ...result.data };
+    },
+  }));
+
+  register(defineTool({
+    name: 'butler_quota_refresh',
+    description:
+      '立即查询额度（不传 planId 就查全部）。查询是串行单飞的：上一轮没结束会直接跳过并告知，这是为了避免并发打满宿主机。',
+    parameters: {
+      planId: { type: 'string', description: '只查这一个计划；留空查全部' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => text(value) },
+    async execute(args) {
+      const result = await service.refreshQuota(args.planId);
+      if (!result.ok) return result;
+      const data = result.data;
+      const lines = (data.results || []).map((item) => {
+        const label = item.name ? `${item.name}（${item.planId}）` : item.planId;
+        if (item.status === 'no-credential') return `- ${label}：缺凭证，先在面板「填凭证」再查`;
+        if (item.status === 'manual') return `- ${label}：手动源，没有自动窗口`;
+        if (item.status !== 'ok') return `- ${label}：失败 ${item.error || '未知错误'}`;
+        const wins = (item.windows || [])
+          .map((w) => `${w.label} ${w.percent === null || w.percent === undefined ? '—' : Math.round(w.percent * 100) + '%'}`)
+          .join('；');
+        return `- ${label}：${wins || '无窗口数据'}`;
+      });
+      return { ok: true, text: `额度查询完成（${data.results?.length || 0} 个计划）\n${lines.join('\n') || '- 无计划'}`, ...data };
+    },
+  }));
+
+  /* ---------------------------- 额度源（模型可写） ---------------------------- */
+
+  const SOURCE_CONTRACT = [
+    '查询代码是一个 async 函数，入参一个对象：',
+    '{ http, credential, plan, kit, now, console }',
+    '- http.get(url, { headers }) / http.post(url, body, { headers }) / http.request({ url, method, headers, body, parse })',
+    '  返回 { status, ok, text, json }；只允许访问 hosts 里登记的域名，强制超时。',
+    '- credential：这个额度源的用户凭证（可能为空字符串）；自己决定放 Bearer 还是 query 还是 cookie。',
+    '- kit.num(v, 兜底) / kit.pct(used, limit) / kit.iso(v) / kit.get(obj, "a.b[0].c") / kit.ms.now()',
+    '- console.log 会被收集进 logs，方便调试（不会打扰用户）。',
+    '必须返回窗口数组，元素形如：',
+    '{ key: "monthly", label: "本月额度", limit: 100, used: 31, remaining: 69, percent: 31, unit: "percent", resetAt: "2026-12-01T00:00:00Z" }',
+    'percent 写 0~100 或 0~1 都行（>1 时按百分数处理）；resetAt 可用 ISO 字符串、秒/毫秒时间戳，或 kit.iso(x)。',
+    '安全边界（要如实告诉用户，不许淡化）：查询代码按「用户自己写的脚本」对待，',
+    '默认在独立 worker 线程里跑（死循环会被强制终止、不卡宿主），只能访问 hosts 登记的域名，',
+    '有超时与响应体积上限。但 node:vm 不是安全沙箱——沙箱里默认拿不到 fs/process/require，',
+    '那是能力上没提供，不是技术上绕不过去。所以：绝不接受来路不明的代码，一次查询最多发 2~3 个请求。',
+  ].join('\n');
+
+  register(defineTool({
+    name: 'butler_source_list',
+    description:
+      '列出可用的额度源：内置（claude-usage / deepseek / openai / generic / manual）和模型之前写好的自定义源（custom:*）。'
+      + '要给某个平台建额度监控前先看这里——已经有对应源就直接用 sourceId，不要重复造。',
+    parameters: {
+      includeCode: { type: 'boolean', description: '是否连查询代码一起返回（默认 false，只看名字/id/hosts）' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => text(value, '已列出额度源') },
+    async execute(args) {
+      const result = service.listSources({ includeCode: Boolean(args.includeCode) });
+      if (!result.ok) return result;
+      const list = result.data.sources;
+      const lines = list.map((s) => `- ${s.id}｜${s.label}${s.custom ? '（自定义）' : ''}${s.hosts?.length ? ' · ' + s.hosts.join(',') : ''}${s.lastTestOk === false ? ' · 上次试跑失败' : ''}`);
+      return { ok: true, text: `可选额度源 ${list.length} 个\n${lines.join('\n')}`, sources: list };
+    },
+  }));
+
+  register(defineTool({
+    name: 'butler_source_test',
+    description:
+      '用真实请求试跑一段额度查询代码（不保存）。遇到没有内置源的平台时，你先写代码、先试跑，'
+      + '把试跑结果（抓到哪些窗口、原始响应长什么样）摆给用户看，用户确认后再 butler_source_save。\n'
+      + SOURCE_CONTRACT,
+    parameters: {
+      code: { type: 'string', description: '查询代码（async 函数）。给了 code 就试跑它；不给则试跑 sourceId 指向的已保存源' },
+      hosts: { type: 'string', description: '这段代码允许访问的域名，逗号分隔，如 api.cursor.com 或 *.openai.com' },
+      label: { type: 'string', description: '给这次试跑起的名字，只用于展示' },
+      planId: { type: 'string', description: '可选：借用这个额度计划已保存的凭证来试跑' },
+      credential: { type: 'string', description: '可选：直接给一个临时凭证（优先用 planId 里的，避免凭证进会话）' },
+      sourceId: { type: 'string', description: '可选：试跑已保存的额度源（改完代码想看效果时用）' },
+      needsCredential: { type: 'boolean', description: '这个源是否需要凭证，默认 true' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => text(value) },
+    async execute(args) {
+      const result = await service.testSource({
+        code: args.code,
+        hosts: args.hosts,
+        label: args.label,
+        planId: args.planId,
+        credential: args.credential,
+        sourceId: args.sourceId,
+        needsCredential: args.needsCredential,
+      });
+      if (!result.ok) return result;
+      const data = result.data;
+      const winLines = data.windows.map((w) => {
+        const pct = w.percent === null || w.percent === undefined ? '—' : `${Math.round(w.percent * 100)}%`;
+        const reset = w.resetAt ? `，重置 ${fmtLocal(w.resetAt)}（${humanDelta(w.resetAt)}）` : '，重置时间未知';
+        const left = w.remaining === null || w.remaining === undefined ? '' : `，剩余 ${w.remaining}`;
+        return `- ${w.label}：已用 ${pct}${left}${reset}`;
+      });
+      return {
+        ok: true,
+        text:
+          `试跑成功（${data.ms}ms，访问 ${data.hosts.join(', ') || '无'}）\n`
+          + `${winLines.join('\n')}\n`
+          + `原始响应（已抹掉凭证、截断）：\n${data.sample || '（代码没有返回 raw 样本）'}\n\n`
+          + '下一步：把上面的窗口和样本给用户看，**问一句确认**，用户点头后再调 butler_source_save。',
+        windows: data.windows,
+        hosts: data.hosts,
+        logs: data.logs,
+        ms: data.ms,
+        sample: data.sample,
+      };
+    },
+  }));
+
+  register(defineTool({
+    name: 'butler_source_save',
+    description:
+      '保存一段查询代码，成为可复用的额度源（id 形如 custom:cursor）。保存后就能在 butler_plan_save 里用 sourceId 指向它，'
+      + '由引擎按 pollSeconds 自动刷新。硬要求：**必须先 butler_source_test 跑通并让用户确认**，否则会拒绝保存。\n'
+      + SOURCE_CONTRACT,
+    parameters: {
+      label: { type: 'string', required: true, description: '额度源名称，如「Cursor 用量」' },
+      code: { type: 'string', required: true, description: '查询代码（async 函数）' },
+      hosts: { type: 'string', required: true, description: '允许访问的域名，逗号分隔，如 api.cursor.com' },
+      id: { type: 'string', description: '可选：已有源就用它的 id（custom:xxx）做更新；不给则新建' },
+      vendor: { type: 'string', description: '平台名，如 Cursor' },
+      needsCredential: { type: 'boolean', description: '是否需要凭证，默认 true' },
+      credentialHint: { type: 'string', description: '告诉用户去哪儿拿凭证（写清楚「不是 DSH 模型 key」）' },
+      notes: { type: 'string', description: '备注：接口来源、坑位、失效时间等' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => text(value) },
+    async execute(args) {
+      const result = service.saveSource({
+        id: args.id,
+        label: args.label,
+        code: args.code,
+        hosts: args.hosts,
+        vendor: args.vendor,
+        needsCredential: args.needsCredential,
+        credentialHint: args.credentialHint,
+        notes: args.notes,
+      });
+      if (!result.ok) return result;
+      const source = result.data.source;
+      return {
+        ok: true,
+        text: `${result.data.created ? '已新建' : '已更新'}额度源：${source.label}（${source.id}）\n`
+          + `允许访问：${source.hosts.join(', ')}\n`
+          + `下一步：butler_plan_save { name, sourceId: "${source.id}" } 建监控计划，然后 butler_quota_refresh 验证一次。`,
+        source,
+      };
+    },
+  }));
+
+  register(defineTool({
+    name: 'butler_source_delete',
+    description: '删除一个自定义额度源；还有计划在用它时会拒绝，先把那些计划的来源换掉。',
+    parameters: {
+      id: { type: 'string', required: true, description: '额度源 id（custom:xxx）' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => text(value) },
+    async execute(args) {
+      const result = service.deleteSource(args.id);
+      if (!result.ok) return result;
+      return { ok: true, text: `已删除额度源 ${args.id}` };
+    },
+  }));
+
+  /* ---------------------------- 扩展/杂项 ---------------------------- */
+
+  register(defineTool({
+    name: 'butler_kind_register',
+    description: '注册一种新的资产种类（L3 扩展）。当截图里出现现有种类覆盖不了的东西（域名、服务器、保险、会员卡）时先注册再记录。',
+    parameters: {
+      id: { type: 'string', required: true, description: '种类标识，小写字母/数字/下划线/连字符，如 server、insurance' },
+      label: { type: 'string', description: '中文名，如 服务器' },
+      hint: { type: 'string', description: '识别提示：什么样的截图属于这一类，给后续识别用' },
+      collection: { type: 'string', description: '归属集合，默认 assets' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => text(value) },
+    async execute(args) {
+      const result = service.registerKind(args);
+      if (!result.ok) return result;
+      return { ok: true, text: `已注册种类：${result.data.kind.label}（${result.data.kind.id}）`, kind: result.data.kind };
+    },
+  }));
+
+  register(defineTool({
+    name: 'butler_alerts',
+    description: '查看或处理未确认提醒（到期、额度超阈值、逾期借贷）。action=list 只看；ack 确认一条；ackAll 全部确认。',
+    parameters: {
+      action: { type: 'string', description: 'list（默认）| ack | ackAll' },
+      id: { type: 'string', description: 'action=ack 时的提醒 id' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => text(value) },
+    async execute(args) {
+      const action = args.action || 'list';
+      if (action === 'ack') {
+        if (!args.id) return { ok: false, error: 'ack 需要 id' };
+        const result = service.ackAlert(args.id);
+        if (!result.ok) return result;
+        return { ok: true, text: `已确认提醒 ${args.id}` };
+      }
+      if (action === 'ackAll') {
+        const result = service.ackAllAlerts();
+        return { ok: true, text: `已确认 ${result.data.acknowledged} 条提醒` };
+      }
+      const list = service.state().alerts.filter((a) => !a.acknowledged);
+      const lines = list.map((a) => `- [${a.level}] ${a.title}：${a.message} · id=${a.id}`);
+      return { ok: true, text: `未确认提醒 ${list.length} 条\n${lines.join('\n') || '- （无）'}`, alerts: list };
+    },
+  }));
+
+  register(defineTool({
+    name: 'butler_reminders_sync',
+    description: '把待办/借贷/资产的提醒重新对账到宿主的定时任务（改完时间、修好配置后调一次）。',
+    parameters: {
+      force: { type: 'boolean', description: '忽略指纹强制重建，默认 false' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => text(value) },
+    async execute(args) {
+      const result = await service.syncReminders({ force: Boolean(args.force) });
+      if (!result.ok) return result;
+      const data = result.data;
+      return {
+        ok: true,
+        text: `提醒对账完成：新建 ${data.created || 0}，沿用 ${data.kept || 0}，清理 ${data.removed || 0}`
+          + (data.skippedPast ? `，已过期跳过 ${data.skippedPast}` : ''),
+        ...data,
+      };
+    },
+  }));
+
+  return () => {
+    for (const dispose of disposers) {
+      try {
+        dispose?.();
+      } catch {
+        /* 卸载阶段忽略 */
+      }
+    }
+  };
+}

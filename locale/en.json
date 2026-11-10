@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Desktop butler",
+    "description": "Reads a screenshot into intent, then tracks subscriptions, token quotas, to-dos and debts with timed reminders."
+  }
+}

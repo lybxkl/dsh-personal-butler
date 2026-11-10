@@ -1,0 +1,69 @@
+{
+  "name": "@local/butler",
+  "version": "0.1.0",
+  "private": true,
+  "description": "桌面私人管家：截图识别意图 → 订阅资产 / Token 额度 / 待办 / 借贷，全部走 DSH 内置 AI 能力。",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./icon": "./icon.svg",
+    "./locale/*.json": "./locale/*.json",
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "icon": "./icon.svg",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ]
+    },
+    "manifestVersion": 1
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-client-ui-slots": "*",
+    "@deepseek-ai/dsh-host-webserver": "*",
+    "@deepseek-ai/dsh-tools": "*",
+    "react": "*"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "icon.svg",
+    "src",
+    "locale",
+    "cordis.patch.yml",
+    "docs",
+    "LICENSE",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lybxkl/dsh-personal-butler.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lybxkl/dsh-personal-butler/issues"
+  },
+  "homepage": "https://github.com/lybxkl/dsh-personal-butler#readme",
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "butler",
+    "personal-assistant"
+  ],
+  "license": "MIT"
+}

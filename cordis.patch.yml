@@ -1,0 +1,23 @@
+# @local/butler bundle patch：Host 半片与浏览器半片由同一个包提供
+#
+# config 是「可调值」的唯一入口（升级插件不会覆盖本文件的用户修改）。
+# 全部字段都可省略；省略即用 src/defaults.js 里的默认值。
+#   pollSeconds      额度轮询间隔秒数（默认 30；0 或负数 = 关闭自动轮询）
+#   advanceMinutes   到期/到点提醒的提前量（默认 30 分钟；可被单条记录覆盖）
+#   currency         默认货币（默认 CNY）
+#   reminderTarget   提醒投递目标（new_once | new | session；默认 new_once）
+#   reminderSession  当 reminderTarget=session 时的目标会话 id
+#   quotaSources     额度源覆盖：{ "<sourceId>": { "baseUrl": "...", "endpoint": "...", "headers": {} } }
+#   apiToken         面板 HTTP 路由的访问令牌（默认空 = 只校验 loopback/Origin）
+#   maxSnapshots     每个额度计划的采样保留条数（默认 240）
+- insert:
+    - id: butler
+      name: '@local/butler'
+      config:
+        pollSeconds: 30
+        advanceMinutes: 30
+        currency: CNY
+        reminderTarget: new_once
+        quotaSources: {}
+        apiToken: ''
+        maxSnapshots: 240

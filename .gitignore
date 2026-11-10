@@ -1,0 +1,9 @@
+# 开发/调试产物（含示例数据，勿提交）
+_build/
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
+# 本机插件运行产生的数据
+butler.json
+credentials.json
