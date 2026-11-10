@@ -2280,14 +2280,14 @@
                     )
                   : adding === 'plan'
                   ? null
-                  : h(Empty, {
+                  : h('div', { className: 'btl-empty-narrow' }, h(Empty, {
                       icon: 'bolt',
                       title: t('assets.plansEmpty'),
                       hint: t('assets.plansEmptyHint'),
                       action: h(Btn, { tone: 'ghost', icon: 'plus', onClick: function () {
                         startAdd('plan');
                       } }, t('assets.planAdd'))
-                    })
+                    }))
               )
             : null
         );
@@ -3155,7 +3155,9 @@
         '.btl-check:hover{border-color:var(--dsw-alias-brand-primary)}',
         '.btl-check-on{background:var(--dsw-alias-state-success-primary);border-color:var(--dsw-alias-state-success-primary)}',
 
-        '.btl-plan-list{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(auto-fit, minmax(290px, 1fr));gap:10px}',
+        '.btl-plan-list{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(auto-fill, minmax(296px, 372px));justify-content:start;gap:10px}',
+        // 额度卡片按固定宽度排，只有一条时不会被拉成一整行
+        '.btl-empty-narrow{max-width:460px}',
         '.btl-plan{display:flex;flex-direction:column;gap:10px;padding:13px;border-radius:var(--btl-radius);border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1)}',
         '.btl-plan-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}',
         '.btl-plan-title{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}',
