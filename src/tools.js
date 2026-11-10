@@ -34,24 +34,32 @@ export function registerTools(ctx, service, helpers) {
   const { logger, photos } = helpers;
   const disposers = [];
 
-  /** 把用户刚发的那张图复制进管家数据目录；返回 photoId（失败抛错，由调用方决定是否致命）。 */
+  /** 把用户这一轮发的图都复制进管家数据目录；返回 photoId 数组（失败抛错，由调用方决定是否致命）。 */
   async function keepUserPhoto(args, exec) {
     if (!photos) throw new Error('当前宿主没有图片服务');
     const refs = userImageRefs(exec);
     const wanted = typeof args?.attachmentId === 'string' ? args.attachmentId.trim() : '';
-    const ref = wanted
-      ? refs.find((r) => String(r.attachmentId) === wanted)
-      : refs[refs.length - 1];
-    if (!ref) {
-      throw new Error(wanted
-        ? `找不到附件 ${wanted}（只能是本次对话里上传的图片）`
-        : '本次对话里没有找到图片：先把照片/截图发进来，我才能一起存下');
+    // 附件对象上可能叫 attachmentId，也可能只有 id —— 两种都认，免得模型指定了某张却永远匹配不上
+    const idOf = (ref) => String(ref?.attachmentId ?? ref?.id ?? '');
+    let picked;
+    if (wanted) {
+      const hit = refs.find((r) => idOf(r) === wanted);
+      if (!hit) throw new Error(`找不到附件 ${wanted}（只能是本次对话里上传的图片）`);
+      picked = [hit];
+    } else {
+      // 一次发多张（柜子全貌 / 抽屉内部 / 标签特写）时全部存下来，不要只留最后一张
+      picked = refs.slice(-12);
     }
+    if (!picked.length) throw new Error('本次对话里没有找到图片：先把照片/截图发进来，我才能一起存下');
     const attachments = (() => {
       try { return ctx.get('attachments'); } catch { return undefined; }
     })();
-    const record = await photos.saveFromRef(ref, { attachments });
-    return record.id;
+    const ids = [];
+    for (const ref of picked) {
+      const record = await photos.saveFromRef(ref, { attachments });
+      ids.push(record.id);
+    }
+    return { ids, totalInMessage: refs.length };
   }
 
   function register(definition) {
@@ -562,22 +570,24 @@ export function registerTools(ctx, service, helpers) {
     name: 'butler_item_save',
     description:
       '记录「家里的东西放在哪了」（收纳）。用户发照片或文字说「这个放哪了」时用。'
-      + '必须问清：是什么东西、放在哪（房间/柜子/抽屉都可以）、多少件、什么时候放的；'
+      + '必须问清：是什么东西、放在哪（房间/柜子/抽屉都可以；location 与 detail 至少给一个）、多少件、什么时候放的；'
       + '用户发的是照片，就先从图里认出是什么东西、放在哪、有几件，再和他确认。'
-      + '用户这次消息里带了图片时会自动把图一起存下来（只认这次的消息，不会翻出旧截图；图片 id 不在 prompt 里，不用填）。'
-      + '同一个东西换位置时带 id 更新，不要新建；想指定某一张图才传 attachmentId，不要存图时传 keepPhoto=false。',
+      + '用户这次消息里带了图片时会自动把图一起存下来（这条消息里有多张就全部存，最多 12 张；只认这次的消息，不会翻出旧截图）。'
+      + '同一个东西换位置时带 id 更新，不要新建；想指定某一张图才传 attachmentId，不要存图时传 keepPhoto=false。'
+      + '要改/删已有的照片：把想保留的照片 id 放进 photoIds（可从 butler_item_find 的返回里取），空数组表示全部摘掉。',
     parameters: {
       id: { type: 'string', description: '要更新的物品 id；新增留空' },
       name: { type: 'string', required: true, description: '物品名称，如 充电器、备用钥匙、圣诞装饰' },
-      location: { type: 'string', required: true, description: '位置，如 书房、阳台储物柜、电视柜抽屉' },
+      location: { type: 'string', description: '位置，如 书房、阳台储物柜、电视柜抽屉（与 detail 至少给一个）' },
       detail: { type: 'string', description: '更细的位置，如 第 2 层左边、贴着冰箱那侧' },
-      quantity: { type: 'number', description: '数量，如 2' },
+      quantity: { type: 'number', description: '数量，如 2（0 ~ 1000000）' },
       unit: { type: 'string', description: '数量单位，如 个 / 把 / 盒' },
       category: { type: 'string', description: '分类，如 电子配件 / 证件 / 药' },
-      placedAt: { type: 'string', description: '什么时候放的，支持 2026-11-10、昨天、3 天前' },
+      placedAt: { type: 'string', description: '什么时候放的，支持 2026-11-10、昨天、3 天前（不能是将来时间）' },
       note: { type: 'string', description: '备注：干嘛用的、和什么放一起、多久没用过' },
       tags: { type: 'string', description: '关键词，逗号或空格分隔，方便以后搜' },
-      attachmentId: { type: 'string', description: '指定某张图（一般不用传，默认存最近一张用户图）' },
+      photoIds: { type: 'array', description: '要保留的照片 id 列表；不传=不动已有照片，传 []=全部摘掉' },
+      attachmentId: { type: 'string', description: '指定某一张图（一般不用传，默认把这条消息里的图都存下来）' },
       keepPhoto: { type: 'boolean', description: '传 false 表示这次不要存图，只记位置' },
       source: { type: 'string', description: '来源：screenshot | manual | model' },
     },
@@ -590,28 +600,34 @@ export function registerTools(ctx, service, helpers) {
       let record = result.data.record;
       let photoNote = '';
       if (args.keepPhoto !== false) {
-        const hasImage = userImageRefs(exec).length > 0;
+        const refs = userImageRefs(exec);
+        const hasImage = refs.length > 0;
         const wanted = typeof args.attachmentId === 'string' && args.attachmentId.trim();
         if (hasImage || wanted) {
           try {
-            const photoId = await keepUserPhoto(args, exec);
-            const attached = await service.attachPhotos(record.id, [photoId]);
+            const kept = await keepUserPhoto(args, exec);
+            const attached = await service.attachPhotos(record.id, kept.ids);
             if (attached.ok) {
               record = attached.data.record;
-              photoNote = `\n照片已一起存好（共 ${record.photoCount} 张），面板里点开就能看。`;
+              const stored = attached.data.attached ?? kept.ids.length;
+              const skipped = attached.data.skipped ?? 0;
+              photoNote = `\n照片已一起存好（存了 ${stored} 张，这件东西现在共 ${record.photoCount} 张）`
+                + (skipped ? `；另有 ${skipped} 张本来就挂在这件东西上，没有重复存` : '')
+                + (kept.totalInMessage > kept.ids.length ? `。这条消息一共 ${kept.totalInMessage} 张，只存了最近 ${kept.ids.length} 张` : '');
             } else {
-              photoNote = `\n（图片存下来了，但没挂到记录上：${attached.error}）`;
+              photoNote = `\n（图片已经存进管家目录，但没挂到记录上：${attached.error}）`;
             }
           } catch (error) {
-            photoNote = wanted ? `\n⚠ 图片没存上：${error?.message || error}` : '';
-            if (wanted) return { ok: false, error: `物品已记录，但图片没存上：${error?.message || error}（id=${record.id}）` };
+            // 图片没存上不该让整次调用变成「失败」：物品其实已经记好了，重试会产生重复记录
+            photoNote = `\n⚠ 物品已记录，但图片没存上：${error?.message || error}`;
           }
         }
       }
       return {
         ok: true,
+        ...(result.data.warning ? { warning: result.data.warning } : {}),
         text: `已收纳：${record.name} · ${record.placeLabel}${record.quantityLabel ? ` · ${record.quantityLabel}` : ''}`
-          + `${record.placedAt ? ` · ${record.placedAt.slice(0, 10)} 放的` : ''}（id=${record.id}）${photoNote}`,
+          + `${record.placedAtLabel ? ` · ${record.placedAtLabel} 放的` : ''}（id=${record.id}）${photoNote}`,
         record,
       };
     },
@@ -631,22 +647,25 @@ export function registerTools(ctx, service, helpers) {
     async execute(args) {
       const result = service.findItems(args);
       if (!result.ok) return result;
-      const { items, total } = result.data;
+      const { items, total, shown, limit } = result.data;
       if (!items.length) {
-        return { ok: true, text: '没找到记录。可以让用户换个说法，或者问问他最近一次见到是什么时候、大概在哪个房间。', items: [], total: 0 };
+        return { ok: true, text: '没找到记录。可以让用户换个说法，或者问问他最近一次见到是什么时候、大概在哪个房间。', items: [], total: 0, shown: 0, limit };
       }
       const lines = items.map((item) => `- ${item.name} → ${item.placeLabel}`
         + `${item.quantityLabel ? ` · ${item.quantityLabel}` : ''}`
-        + `${item.placedAt ? ` · ${item.placedAt.slice(0, 10)} 放的` : ''}`
+        + `${item.placedAtLabel ? ` · ${item.placedAtLabel} 放的` : ''}`
         + `${item.photoCount ? ` · ${item.photoCount} 张照片` : ''}`
         + `${item.note ? ` · 备注：${item.note}` : ''}（id=${item.id}）`);
-      return { ok: true, text: `找到 ${total} 条：\n${lines.join('\n')}`, items, total };
+      const head = total > shown
+        ? `共 ${total} 条，这里显示前 ${shown} 条（要更多可以调 limit，最多 50；或加 location 缩小范围）：`
+        : `找到 ${total} 条：`;
+      return { ok: true, text: `${head}\n${lines.join('\n')}`, items, total, shown, limit };
     },
   }));
 
   register(defineTool({
     name: 'butler_item_delete',
-    description: '删除一条收纳记录（东西拿走了/记错了）。删之前先和用户确认；同时会把它的照片一起删掉。',
+    description: '删除一条收纳记录（东西拿走了/记错了）。删之前先和用户确认；它会把自己独占的照片一起删掉，仍被别的记录引用的照片会保留。',
     parameters: {
       id: { type: 'string', required: true, description: '物品 id' },
     },
@@ -654,7 +673,8 @@ export function registerTools(ctx, service, helpers) {
     async execute(args) {
       const result = await service.removeItem(args.id);
       if (!result.ok) return result;
-      return { ok: true, text: `已删除收纳记录 ${args.id}（含照片）` };
+      const removed = result.data.removedPhotos || 0;
+      return { ok: true, text: `已删除收纳记录 ${args.id}${removed ? `（一起删掉 ${removed} 张照片）` : '（照片被别的记录引用，保留着）'}` };
     },
   }));
 

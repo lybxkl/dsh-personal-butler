@@ -184,6 +184,8 @@ export function parseWhen(input, reference = new Date()) {
     const d = new Date(n < 1e11 ? n * 1000 : n);
     return Number.isNaN(d.getTime()) ? null : d;
   }
+  // 其它纯数字（'0'、'5'、'20261111'）不是时间戳；不能让 Date.parse 把它们解释成 2000/2001 年
+  if (/^-?\d+(?:\.\d+)?$/.test(s)) return null;
 
   // ISO / 带时区
   if (/[zZ]$|[+-]\d{2}:?\d{2}$/.test(s)) {

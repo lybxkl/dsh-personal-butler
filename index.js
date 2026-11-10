@@ -109,7 +109,8 @@ export function apply(ctx, rawConfig = {}) {
   const alerts = createAlerts({ store, config, logger });
 
   // 物品照片：会话附件会随会话清理，所以复制到 <dataDir>/photos 自己保管
-  const photos = createPhotos({ dir, store, logger });
+  // secret 用于给图片 URL 签名：<img src> 带不了 x-butler-token 请求头，配了 apiToken 时只能靠签名放行
+  const photos = createPhotos({ dir, store, logger, secret: config.apiToken || '' });
   // 对账：文件被删掉的照片记录清掉；归属物件已不在的解除挂接（避免面板显示永远加载不出的图）
   try {
     photos.reconcile();

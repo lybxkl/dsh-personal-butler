@@ -3475,129 +3475,159 @@
         );
       }
 
-      function ItemRow(props) {
-        var item = props.item;
-        var editingState = React.useState(false);
-        var editing = editingState[0];
-        var setEditing = editingState[1];
-        var draftState = React.useState(null);
-        var draft = draftState[0];
-        var setDraft = draftState[1];
+            function ItemRow(props) {
+              var item = props.item;
+              var editingState = React.useState(false);
+              var editing = editingState[0];
+              var setEditing = editingState[1];
+              var draftState = React.useState(null);
+              var draft = draftState[0];
+              var setDraft = draftState[1];
+              // 编辑期间的图片列表：本地改动 + 保存时才落库，取消就回滚（半路删掉的图不会伤人）
+              var photoState = React.useState(null);
+              var localPhotos = photoState[0];
+              var setLocalPhotos = photoState[1];
 
-        function begin() {
-          setDraft({
-            name: item.name,
-            location: item.location,
-            detail: item.detail || '',
-            quantity: item.quantity === null || item.quantity === undefined ? '' : String(item.quantity),
-            unit: item.unit || '',
-            placedAt: item.placedAt ? item.placedAt.slice(0, 16).replace('T', ' ') : '',
-            note: item.note || '',
-            tags: (item.tags || []).join(' ')
-          });
-          setEditing(true);
-        }
-
-        function photoIds() {
-          return (item.photos || []).map(function (photo) {
-            return photo.id;
-          });
-        }
-
-        if (editing) {
-          var current = draft || {};
-          return h(
-            'li',
-            { className: 'btl-item btl-item-editing' },
-            h(Form, {
-              title: item.name,
-              fields: itemFields(),
-              draft: current,
-              dirty: true,
-              busy: props.busy,
-              photoBlock: h(PhotoPicker, {
-                photos: item.photos,
-                uploading: props.uploading,
-                onOpen: props.onOpenPhoto,
-                onPick: function (files) {
-                  props.onPickPhotos(files, item, function (ids) {
-                    props.onAttach(item.id, photoIds().concat(ids));
-                  });
-                },
-                onRemove: function (photo) {
-                  props.onAttach(item.id, photoIds().filter(function (id) {
-                    return id !== photo.id;
-                  }));
-                  props.onDropPhoto(photo);
-                }
-              }),
-              onChange: function (patch) {
-                setDraft(Object.assign({}, current, patch));
-              },
-              onSubmit: function () {
-                props.onSave(
-                  Object.assign({ id: item.id }, current, { photoIds: photoIds() }),
-                  function (ok) {
-                    if (ok) setEditing(false);
-                  }
-                );
-              },
-              onCancel: function () {
-                setEditing(false);
-              },
-              onDelete: function () {
-                props.onDelete(item.id);
+              function initialPhotos() {
+                return item.photos || [];
               }
-            })
-          );
-        }
 
-        var meta = [
-          item.placeLabel || t('items.noPlace'),
-          item.quantityLabel || '',
-          item.placedAtLabel ? t('items.placedAtShort', { at: item.placedAtLabel }) : '',
-          item.photoCount ? t('items.photoCount', { n: item.photoCount }) : ''
-        ].filter(Boolean);
+              function currentPhotos() {
+                return localPhotos === null ? initialPhotos() : localPhotos;
+              }
 
-        return h(
-          'li',
-          { className: 'btl-item btl-item-hover' },
-          h(
-            'span',
-            { className: 'btl-item-thumb' },
-            item.photos && item.photos.length
-              ? h('img', {
-                  src: photoUrl(item.photos[0]),
-                  alt: '',
-                  loading: 'lazy',
-                  onClick: function (event) {
-                    event.stopPropagation();
-                    props.onOpenPhoto(item.photos[0]);
+              function begin() {
+                setDraft({
+                  name: item.name,
+                  location: item.location,
+                  detail: item.detail || '',
+                  quantity: item.quantity === null || item.quantity === undefined ? '' : String(item.quantity),
+                  unit: item.unit || '',
+                  placedAt: item.placedAt ? item.placedAt.slice(0, 16).replace('T', ' ') : '',
+                  note: item.note || '',
+                  tags: (item.tags || []).join(' ')
+                });
+                setLocalPhotos(null);
+                setEditing(true);
+              }
+
+              function closeEdit() {
+                setEditing(false);
+                setLocalPhotos(null);
+              }
+
+              if (editing) {
+                var current = draft || {};
+                var photos = currentPhotos();
+                var keep = photos.map(function (photo) {
+                  return photo.id;
+                });
+                var originals = initialPhotos().map(function (photo) {
+                  return photo.id;
+                });
+                var removedOnSave = initialPhotos().filter(function (photo) {
+                  return keep.indexOf(photo.id) < 0;
+                });
+                var addedUnused = photos.filter(function (photo) {
+                  return originals.indexOf(photo.id) < 0;
+                });
+                var form = h(Form, {
+                  title: item.name,
+                  fields: itemFields(),
+                  draft: current,
+                  dirty: true,
+                  busy: props.busy,
+                  photoBlock: h(PhotoPicker, {
+                    photos: photos,
+                    uploading: props.uploading,
+                    onOpen: props.onOpenPhoto,
+                    onPick: function (files) {
+                      props.onPickPhotos(files, function (uploaded) {
+                        setLocalPhotos(currentPhotos().concat(uploaded));
+                      });
+                    },
+                    onRemove: function (photo) {
+                      setLocalPhotos(
+                        currentPhotos().filter(function (one) {
+                          return one.id !== photo.id;
+                        })
+                      );
+                    }
+                  }),
+                  onChange: function (patch) {
+                    setDraft(Object.assign({}, current, patch));
+                  },
+                  onSubmit: function () {
+                    props.onSave(Object.assign({ id: item.id }, current, { photoIds: keep }), function (ok) {
+                      if (!ok) return;
+                      // 保存成功后再删被摘掉的图片文件；删不掉也不影响记录（后端会拒绝删还挂着的图）
+                      removedOnSave.forEach(props.onDropPhoto);
+                      closeEdit();
+                    });
+                  },
+                  onCancel: function () {
+                    // 取消：把这次新传但没保存的图片删掉，被删的原图不动
+                    addedUnused.forEach(props.onDropPhoto);
+                    closeEdit();
+                  },
+                  onDelete: function () {
+                    props.onDelete(item.id);
                   }
-                })
-              : h(Ico, { name: 'box', size: 16 })
-          ),
-          h(
-            'span',
-            {
-              className: 'btl-item-main btl-item-clickable',
-              onClick: begin,
-              role: 'button',
-              tabIndex: 0,
-              onKeyDown: activateOnKey(begin)
-            },
-            h('span', { className: 'btl-item-title btl-item-title-clamp' }, h('span', { className: 'btl-item-name' }, item.name)),
-            h('span', { className: 'btl-item-meta' }, meta.join(t('misc.sep')))
-          ),
-          h(
-            'span',
-            { className: 'btl-item-side' },
-            h(IconBtn, { icon: 'edit', title: t('misc.edit'), onClick: begin })
-          )
-        );
-      }
+                });
+                return h('li', { className: 'btl-item btl-item-editing' }, form);
+              }
 
-      function ItemsTab(props) {
+              var meta = [
+                item.placeLabel || t('items.noPlace'),
+                item.quantityLabel || '',
+                item.placedAtLabel ? t('items.placedAtShort', { at: item.placedAtLabel }) : '',
+                item.photoCount ? t('items.photoCount', { n: item.photoCount }) : ''
+              ].filter(Boolean);
+              var first = initialPhotos()[0];
+
+              return h(
+                'li',
+                { className: 'btl-item btl-item-hover' },
+                h(
+                  'span',
+                  { className: 'btl-item-thumb' },
+                  first
+                    ? h('img', {
+                        src: photoUrl(first),
+                        alt: item.name,
+                        loading: 'lazy',
+                        onClick: function (event) {
+                          event.stopPropagation();
+                          props.onOpenPhoto(first);
+                        },
+                        onError: function (event) {
+                          // 文件被手工删掉时不要显示一个破图标
+                          event.currentTarget.style.visibility = 'hidden';
+                        }
+                      })
+                    : h(Ico, { name: 'box', size: 16 })
+                ),
+                h(
+                  'span',
+                  {
+                    className: 'btl-item-main btl-item-clickable',
+                    onClick: begin,
+                    role: 'button',
+                    tabIndex: 0,
+                    onKeyDown: activateOnKey(begin)
+                  },
+                  h('span', { className: 'btl-item-title btl-item-title-clamp' }, h('span', { className: 'btl-item-name' }, item.name)),
+                  h('span', { className: 'btl-item-meta' }, meta.join(t('misc.sep')))
+                ),
+                h(
+                  'span',
+                  { className: 'btl-item-side' },
+                  h(IconBtn, { icon: 'edit', title: t('misc.edit'), onClick: begin })
+                )
+              );
+            }
+
+function ItemsTab(props) {
         var data = props.data;
         var api = props.api;
         var query = props.query;
@@ -3726,9 +3756,6 @@
           });
         }
 
-        function attach(itemId, ids) {
-          api.mutate('items', 'update', { id: itemId, photoIds: ids }, itemId);
-        }
 
         var addDraft = Object.assign({}, draft);
 
@@ -3826,17 +3853,15 @@
                     busy: api.isBusy('mutate:items'),
                     uploading: uploading,
                     onOpenPhoto: setLight,
-                    onPickPhotos: function (files, row, apply) {
+                    onPickPhotos: function (files, apply) {
                       uploadFiles(files).then(function (uploaded) {
-                        if (uploaded && uploaded.length && apply) {
-                          apply(uploaded.map(function (photo) {
-                            return photo.id;
-                          }));
+                        if (uploaded && uploaded.length && typeof apply === 'function') {
+                          // 行内编辑用的是「照片对象数组」：这里必须原样传对象，不能只传 id（会丢 url/mime）
+                          apply(uploaded);
                         }
                       });
                     },
                     onSave: saveItem,
-                    onAttach: attach,
                     onDropPhoto: dropPhoto,
                     onDelete: function (id) {
                       api.mutate('items', 'delete', null, id);
@@ -3851,9 +3876,9 @@
                   { className: 'btl-empty-narrow' },
                   h(Empty, {
                     icon: 'box',
-                    title: t('items.empty'),
-                    hint: t('items.emptyHint'),
-                    action: h(Btn, {
+                    title: query ? t('app.searchEmpty') : t('items.empty'),
+                    hint: query ? t('items.emptyHint') : t('items.emptyHint'),
+                    action: query ? null : h(Btn, {
                       tone: 'ghost',
                       icon: 'plus',
                       onClick: function () {

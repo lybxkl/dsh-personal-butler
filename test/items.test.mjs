@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
 import { createAlerts } from '../src/alerts.js';
 import { createKinds } from '../src/kinds.js';
-import { createPhotos, MAX_PHOTO_BYTES, sniffImageMime } from '../src/photos.js';
+import { createPhotos, MAX_PHOTO_BYTES, sniffImageMime, verifyPhotoSignature } from '../src/photos.js';
 import { createService } from '../src/service.js';
 import { Store } from '../src/store.js';
 
@@ -141,9 +141,11 @@ test('收纳：已属于别的物品的照片不能挪过来', async () => {
     location: '书房',
     photoIds: [photo.id],
   });
-  assert.equal(stolen.ok, true);
-  assert.equal(stolen.data.record.photoCount, 0);
+  // 现在是明确的失败（以前是静默跳过）：否则调用方以为挂上了，面板却看不到图
+  assert.equal(stolen.ok, false);
+  assert.match(stolen.error, /已经挂在别的物件上/);
   assert.equal(store.find('photos', photo.id).itemId, first.data.record.id);
+  assert.equal(store.find('items', second.data.record.id).photoIds.length, 0);
 });
 
 test('照片：只认真正的图片字节，dataURL 与大小都有边界', () => {
@@ -221,4 +223,128 @@ test('照片：从物件上摘掉后就能删（不再被当成「还挂在物�
   const dropped = await service.removePhoto(photo.id);
   assert.equal(dropped.ok, true);
   assert.equal(photos.find(photo.id), null);
+});
+
+test('收纳：未来的「什么时候放的」被拒绝，说清怎么改', async () => {
+  const { service } = makeService();
+  const future = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
+  const result = await service.upsertItem({ name: '备用钥匙', location: '玄关', placedAt: future });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /将来时间/);
+  // 今天/过去的时间照常
+  const ok = await service.upsertItem({ name: '备用钥匙', location: '玄关', placedAt: '昨天 10:00' });
+  assert.equal(ok.ok, true);
+});
+
+test('照片：缺 id 时说「缺少照片 id」，不要报 undefined', async () => {
+  const { service } = makeService();
+  const result = await service.removePhoto('');
+  assert.equal(result.ok, false);
+  assert.match(result.error, /缺少照片 id/);
+});
+
+/* ------------------------- 审查修复后的回归测试 ------------------------- */
+
+test('照片：记录里的 file 被改成路径逃逸时，读/删都不碰目录外的文件', async () => {
+  const { store, photos } = makeService();
+  const photo = photos.saveBuffer({ data: PNG_BUFFER, mime: 'image/png' });
+  const outside = join(store.filePath, '..', '..', 'escape.txt');
+  store.patch('photos', photo.id, { file: '..\\..\\butler.json' });
+  assert.equal(photos.read(photo.id), null);
+  // 账本文件必须还在
+  assert.equal(existsSync(store.filePath), true);
+  assert.equal(existsSync(outside), false);
+});
+
+test('照片：content-type 只从扩展名推导，记录里的 mime 改不动响应头', () => {
+  const { store, photos } = makeService();
+  const photo = photos.saveBuffer({ data: PNG_BUFFER, mime: 'image/png' });
+  store.patch('photos', photo.id, { mime: 'text/html' });
+  const found = photos.read(photo.id);
+  assert.equal(found.mime, 'image/png');
+});
+
+test('照片：对账会删掉没有记录的孤儿文件，并摘掉物品上的死链', () => {
+  const { store, photos } = makeService();
+  const photo = photos.saveBuffer({ data: PNG_BUFFER, mime: 'image/png' });
+  const item = { id: 'item_g1', name: '钥匙', location: '玄关', detail: '', quantity: null, unit: '', category: '', note: '', tags: [], placedAt: null, photoIds: [photo.id, 'ph_ghost'], source: 'manual' };
+  store.put('items', item);
+  // 造一个没有记录的孤儿文件
+  const orphan = join(photos.root, 'ph_orphan1.png');
+  writeFileSync(orphan, PNG_BUFFER);
+  store.remove('photos', photo.id);
+
+  const result = photos.reconcile();
+  assert.ok(result.orphans >= 1);
+  assert.ok(result.unlinked >= 1);
+  assert.equal(existsSync(orphan), false);
+  assert.deepEqual(store.find('items', 'item_g1').photoIds, []);
+});
+
+test('照片：配了 apiToken 时 URL 带签名，验签通过；签名被改就失效', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'butler-sign-'));
+  const store = new Store({ filePath: join(dir, 'butler.json') }).load();
+  const photos = createPhotos({ dir, store, secret: 'tok-123' });
+  const photo = photos.saveBuffer({ data: PNG_BUFFER, mime: 'image/png' });
+  const view = photos.view(photo);
+  assert.match(view.url, /\?exp=\d+&sig=[\w-]+$/);
+  const query = Object.fromEntries(new URL(view.url, 'http://x').searchParams.entries());
+  assert.equal(verifyPhotoSignature(photo.id, query, 'tok-123'), true);
+  assert.equal(verifyPhotoSignature(photo.id, { ...query, sig: query.sig.slice(0, -1) + 'A' }, 'tok-123'), false);
+  assert.equal(verifyPhotoSignature(photo.id, { ...query, exp: '1' }, 'tok-123'), false);
+});
+
+test('收纳：搜索支持多词（「玄关 钥匙」也能命中）', async () => {
+  const { service } = makeService();
+  await service.upsertItem({ name: '钥匙', location: '玄关' });
+  await service.upsertItem({ name: '充电器', location: '书房' });
+  const hit = service.findItems({ q: '玄关 钥匙' });
+  assert.equal(hit.data.total, 1);
+  assert.equal(hit.data.items[0].name, '钥匙');
+  assert.equal(service.findItems({ q: '玄关 充电器' }).data.total, 0);
+});
+
+test('收纳：改位置时传空 location 不会把原位置抹掉', async () => {
+  const { service } = makeService();
+  const created = await service.upsertItem({ name: '备用钥匙', location: '玄关', detail: '鞋柜' });
+  const updated = await service.upsertItem({ id: created.data.record.id, name: '备用钥匙', location: '', detail: '抽屉' });
+  assert.equal(updated.ok, true);
+  assert.equal(updated.data.record.location, '玄关');
+  assert.equal(updated.data.record.placeLabel, '玄关 · 抽屉');
+});
+
+test('收纳：数量支持「1,000」，认不出的写法按未填处理', async () => {
+  const { service } = makeService();
+  const a = await service.upsertItem({ name: '螺丝', location: '工具箱', quantity: '1,000', unit: '个' });
+  assert.equal(a.data.record.quantity, 1000);
+  assert.equal(a.data.record.quantityLabel, '1000 个');
+  const b = await service.upsertItem({ name: '电池', location: '抽屉', quantity: '两个' });
+  assert.equal(b.data.record.quantity, null);
+});
+
+test('收纳：一件东西最多 12 张照片，超了明确失败而不是静默丢图', async () => {
+  const { service, photos } = makeService();
+  const created = await service.upsertItem({ name: '相册', location: '书架' });
+  const id = created.data.record.id;
+  const ids = [];
+  for (let i = 0; i < 12; i += 1) ids.push(photos.saveBuffer({ data: PNG_BUFFER, mime: 'image/png' }).id);
+  const first = await service.attachPhotos(id, ids);
+  assert.equal(first.ok, true);
+  assert.equal(first.data.record.photoCount, 12);
+  const extra = photos.saveBuffer({ data: PNG_BUFFER, mime: 'image/png' });
+  const over = await service.attachPhotos(id, [extra.id]);
+  assert.equal(over.ok, false);
+  assert.match(over.error, /最多 12 张/);
+  // 第 13 张没有被静默挂上
+  assert.equal(service.findItems({ q: '相册' }).data.items[0].photoCount, 12);
+});
+
+test('收纳：photoIds 传成整个照片对象也能认（模型常整段回传）', async () => {
+  const { service, photos } = makeService();
+  const created = await service.upsertItem({ name: '路由器', location: '电视柜' });
+  const photo = photos.saveBuffer({ data: PNG_BUFFER, mime: 'image/png' });
+  const updated = await service.upsertItem({ id: created.data.record.id, name: '路由器', photoIds: [{ id: photo.id, url: '/x' }] });
+  assert.equal(updated.ok, true);
+  assert.equal(updated.data.record.photoCount, 1);
+  assert.equal(updated.data.record.photos[0].id, photo.id);
 });

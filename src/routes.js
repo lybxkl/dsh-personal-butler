@@ -9,7 +9,10 @@
  *   1) 只接受 loopback 的 Host（防止 DNS rebinding / 局域网访问）
  *   2) 带 Origin 时必须与自身 origin 同源（防 CSRF）
  *   3) 可选 apiToken 头（config.apiToken 非空时强制）
+ * 照片是唯一的例外：`<img src>` 带不了请求头，改由 URL 上的 HMAC 签名放行（见 photos.js）。
  */
+
+import { verifyPhotoSignature } from './photos.js';
 
 const MAX_BODY = 256 * 1024;
 // 照片走 base64，8MB 的图编码后约 10.7MB；其它接口仍用 256KB，别为一张图放宽全部入口。
@@ -257,7 +260,7 @@ export function registerRoutes(ctx, service, helpers) {
         if (!helpers.photos) return { status: 503, payload: { ok: false, error: '图片服务未就绪' } };
         try {
           const record = helpers.photos.saveDataUrl(body?.dataUrl);
-          return { ok: true, photo: helpers.photos.photoView(record), state: service.state() };
+          return { ok: true, photo: helpers.photos.view(record), state: service.state() };
         } catch (error) {
           return { status: 400, payload: { ok: false, error: String(error?.message || error) } };
         }
@@ -310,19 +313,24 @@ export function registerRoutes(ctx, service, helpers) {
             return send(res, 403, { ok: false, error: '跨源请求被拒绝' });
           }
           const token = config.apiToken;
-          if (token) {
-            const provided = headerValue(req, 'x-butler-token');
-            if (provided !== token) return send(res, 401, { ok: false, error: '缺少或错误的 x-butler-token' });
-          }
-
           const url = new URL(req.url || '/', 'http://localhost');
 
-          // 照片是二进制，单独走一条前缀路由（只读，且必须是本次会话能访问到的本机请求）
+          // 照片是二进制，单独走一条前缀路由。鉴权不能用请求头（<img src> 带不了），
+          // 改用 photoView 生成的 exp+sig 签名；面板 fetch 仍可带 x-butler-token。
           const photoPrefix = `${basePath}/api/photo/`;
           if (url.pathname.startsWith(photoPrefix)) {
             if (req.method !== 'GET' && req.method !== 'HEAD') {
               res.setHeader?.('allow', 'GET');
               return send(res, 405, { ok: false, error: '只支持 GET' });
+            }
+            if (token) {
+              const provided = headerValue(req, 'x-butler-token');
+              const query = Object.fromEntries(url.searchParams.entries());
+              const photoIdForAuth = url.pathname.slice(photoPrefix.length);
+              const signed = verifyPhotoSignature(photoIdForAuth, query, token);
+              if (provided !== token && !signed) {
+                return send(res, 403, { ok: false, error: '图片链接无效或已过期' });
+              }
             }
             const photoId = decodeURIComponent(url.pathname.slice(photoPrefix.length));
             const found = helpers.photos?.read(photoId);
@@ -334,6 +342,11 @@ export function registerRoutes(ctx, service, helpers) {
             res.setHeader('x-content-type-options', 'nosniff');
             res.end(found.buffer);
             return;
+          }
+
+          if (token) {
+            const provided = headerValue(req, 'x-butler-token');
+            if (provided !== token) return send(res, 401, { ok: false, error: '缺少或错误的 x-butler-token' });
           }
 
           const route = table.get(url.pathname);

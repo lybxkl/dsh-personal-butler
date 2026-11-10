@@ -88,7 +88,7 @@ function done(data) {
   return { ok: true, data };
 }
 
-export function createService({ store, config, kinds, credentials, quota, reminders, alerts, photos, hooks, recentImageRefs }) {
+export function createService({ store, config, kinds, credentials, quota, reminders, alerts, photos: photosModule, hooks, recentImageRefs }) {
   /** 这个计划自己的额度源登记了哪些域名。 */
   function planSourceHosts(plan) {
     if (!plan) return [];
@@ -650,7 +650,8 @@ export function createService({ store, config, kinds, credentials, quota, remind
   /** 面板/模型看到的物品：补上位置描述、数量文案、照片 URL。 */
   function itemView(item) {
     const photos = (item.photoIds || [])
-      .map((id) => photoView(store.find('photos', id)))
+      // 用带签名的视图：配了 apiToken 时 <img src> 也能直接取图
+      .map((id) => (photosModule?.view ? photosModule.view(store.find('photos', id)) : photoView(store.find('photos', id))))
       .filter(Boolean);
     const quantity = item.quantity === null || item.quantity === undefined ? null : item.quantity;
     return {
@@ -669,22 +670,40 @@ export function createService({ store, config, kinds, credentials, quota, remind
       .toLowerCase();
   }
 
-  /** 找东西：按名称/位置/备注全文匹配，名称命中的排前面。 */
+  /** 找东西：多词按 AND（「玄关 钥匙」这种最自然的问法也要命中），名称命中的排前面。 */
   function findItems(options = {}) {
     const q = String(options.q || options.query || '').trim().toLowerCase();
     const location = String(options.location || '').trim().toLowerCase();
     const limit = Math.min(50, Math.max(1, Number(options.limit) || 10));
+    const words = q.split(/\s+/).filter(Boolean);
     let list = store.list('items').slice();
     if (location) list = list.filter((item) => `${item.location} ${item.detail}`.toLowerCase().includes(location));
-    if (q) list = list.filter((item) => itemHaystack(item).includes(q));
+    if (words.length) list = list.filter((item) => { const hay = itemHaystack(item); return words.every((word) => hay.includes(word)); });
     list.sort((a, b) => {
-      const an = String(a.name).toLowerCase().includes(q) ? 0 : 1;
-      const bn = String(b.name).toLowerCase().includes(q) ? 0 : 1;
+      const an = words.length && String(a.name).toLowerCase().includes(words[0]) ? 0 : 1;
+      const bn = words.length && String(b.name).toLowerCase().includes(words[0]) ? 0 : 1;
       if (an !== bn) return an - bn;
       return String(b.updatedAt).localeCompare(String(a.updatedAt));
     });
     const total = list.length;
-    return done({ items: list.slice(0, limit).map(itemView), total, limit });
+    return done({ items: list.slice(0, limit).map(itemView), total, shown: Math.min(total, limit), limit });
+  }
+
+  /** 把入参里的照片 id 校验成「已登记、且没被别的物件占用」的字符串 id。 */
+  function resolvePhotoIds(rawIds, ownerId) {
+    if (rawIds === undefined) return { ids: null };
+    if (!Array.isArray(rawIds)) return { error: 'photoIds 必须是数组（元素是照片 id）' };
+    const ids = [];
+    for (const raw of rawIds) {
+      const id = typeof raw === 'string' ? raw : raw && typeof raw === 'object' ? raw.id : '';
+      if (!id) return { error: 'photoIds 里有认不出来的元素：要传照片 id（字符串），不是整个照片对象' };
+      const photo = store.find('photos', id);
+      if (!photo) return { error: `照片 ${id} 不存在（可能已经被删了）` };
+      if (photo.itemId && photo.itemId !== ownerId) return { error: `照片 ${id} 已经挂在别的物件上了，先从那边移除` };
+      if (!ids.includes(id)) ids.push(id);
+    }
+    if (ids.length > 12) return { error: `一件东西最多挂 12 张照片，这次给了 ${ids.length} 张` };
+    return { ids };
   }
 
   async function upsertItem(input) {
@@ -692,9 +711,14 @@ export function createService({ store, config, kinds, credentials, quota, remind
     const existing = input.id ? store.find('items', input.id) : null;
     if (input.id && !existing) return fail(`物品 ${input.id} 不存在`);
 
+    // location 只有「明确给了非空值」才覆盖：空串按未提供处理，免得改个位置把原地点抹掉
+    const fields = pick(input, ['name', 'detail', 'quantity', 'unit', 'category', 'note', 'tags', 'photoIds', 'source']);
+    if (typeof input.location === 'string' && input.location.trim()) fields.location = input.location;
+    else if (input.location && typeof input.location === 'object') return fail('location 要写成文字（房间/柜子/抽屉）');
+
     const record = normalizeItem({
       ...(existing || {}),
-      ...pick(input, ['name', 'location', 'detail', 'quantity', 'unit', 'category', 'note', 'tags', 'photoIds', 'source']),
+      ...fields,
       // 「昨天」「3 天前」这类说法要按自然语言解析，不能直接喂给 toIso
       placedAt: input.placedAt === undefined ? existing?.placedAt : toIso(parseWhen(input.placedAt)),
       id: existing?.id,
@@ -703,70 +727,92 @@ export function createService({ store, config, kinds, credentials, quota, remind
     if (!record.location && !record.detail) {
       return fail('要记位置才能帮你找回来：告诉我大概放在哪（房间 / 柜子 / 抽屉都行）');
     }
-    if (input.placedAt !== undefined && input.placedAt !== null && input.placedAt !== '' && !record.placedAt) {
+    const placeAtInput = input.placedAt !== undefined && input.placedAt !== null && input.placedAt !== '';
+    if (placeAtInput && !record.placedAt) {
       return fail(`无法解析「${input.placedAt}」这个时间，可以用 2026-11-10、昨天、3 天前 这类说法`);
     }
-    if (record.quantity !== null && record.quantity < 0) return fail('数量不能是负数');
+    // 「明天放的」说不通：只校验这次真正传进来的时间，别拿存量值拦住改名字/改位置。
+    if (placeAtInput && record.placedAt && Date.parse(record.placedAt) > Date.now() + 5 * 60 * 1000) {
+      return fail(`「${input.placedAt}」是将来时间，收纳记的是已经放好的东西，把日期改成今天或更早`);
+    }
+    if (record.quantity !== null && (record.quantity < 0 || record.quantity > 1e6)) return fail('数量要在 0 ~ 1000000 之间');
 
-    // 照片：只认真正登记过的 id，顺便把归属标上，便于删物品时一起清理
-    const photoIds = [];
+    const resolved = resolvePhotoIds(input.photoIds, record.id || existing?.id);
+    if (resolved.error) return fail(resolved.error);
+    const photoIds = resolved.ids === null ? [...record.photoIds] : resolved.ids;
+    // 只保留真正存在的照片（防止照片记录被删后 item.photoIds 留死链）
+    record.photoIds = photoIds.filter((id) => store.find('photos', id));
     for (const id of record.photoIds) {
       const photo = store.find('photos', id);
-      if (!photo) continue;
-      if (photo.itemId && photo.itemId !== record.id) continue;
-      if (photo.itemId !== record.id) store.patch('photos', photo.id, { itemId: record.id });
-      photoIds.push(id);
+      if (photo && photo.itemId !== record.id) store.patch('photos', id, { itemId: record.id });
     }
-    record.photoIds = photoIds;
     // 从这条记录上摘掉的图要解绑，否则它既不属于任何物件、又因为「还挂在物件上」而删不掉
     for (const photo of store.list('photos')) {
-      if (photo.itemId === record.id && !photoIds.includes(photo.id)) {
+      if (photo.itemId === record.id && !record.photoIds.includes(photo.id)) {
         store.patch('photos', photo.id, { itemId: null });
       }
     }
 
     const saved = store.put('items', record);
     hooks?.onDataChanged?.('items');
-    return done({ record: itemView(store.find('items', saved.id)) });
+    const view = itemView(store.find('items', saved.id));
+    return done({
+      record: view,
+      ...(record.photoIds.length < photoIds.length
+        ? { warning: `有 ${photoIds.length - record.photoIds.length} 张照片找不到，已经忽略` }
+        : {}),
+    });
   }
 
   /** 给已有物品挂照片（工具在写入前先落图，再走这里）。 */
   async function attachPhotos(itemId, photoIds) {
     const item = store.find('items', itemId);
     if (!item) return fail(`物品 ${itemId} 不存在`);
-    const ids = Array.isArray(photoIds) ? photoIds : [photoIds];
-    const merged = [...new Set([...(item.photoIds || []), ...ids.filter((id) => store.find('photos', id))])].slice(0, 12);
+    const existing = (item.photoIds || []).filter((id) => store.find('photos', id));
+    const resolved = resolvePhotoIds(Array.isArray(photoIds) ? photoIds : [photoIds], itemId);
+    if (resolved.error) return fail(resolved.error);
+    const added = resolved.ids.filter((id) => !existing.includes(id));
+    if (existing.length + added.length > 12) {
+      return fail(`这件东西已经有 ${existing.length} 张照片，最多 12 张；这次要加的 ${added.length} 张没挂上`);
+    }
+    const merged = [...existing, ...added];
     for (const id of merged) {
       const photo = store.find('photos', id);
       if (photo && photo.itemId !== itemId) store.patch('photos', id, { itemId });
     }
     const saved = store.patch('items', itemId, { photoIds: merged });
     hooks?.onDataChanged?.('items');
-    return done({ record: itemView(saved) });
+    return done({ record: itemView(saved), attached: added.length, skipped: resolved.ids.length - added.length });
   }
 
   async function removeItem(id) {
     const item = store.find('items', id);
     if (!item) return fail(`物品 ${id} 不存在`);
+    let removedPhotos = 0;
     for (const photoId of item.photoIds || []) {
-      // 只删属于这条物件的照片；同一张图被多条引用时保留
-      const used = store.list('items').filter((other) => other.id !== id && (other.photoIds || []).includes(photoId));
-      if (!used.length) photos.remove(photoId);
+      // 只删属于这条物件的照片；同一张图被多条引用时保留，并把它交还给仍引用它的物件
+      const others = store.list('items').filter((other) => other.id !== id && (other.photoIds || []).includes(photoId));
+      if (!others.length) {
+        photosModule.remove(photoId);
+        removedPhotos += 1;
+      } else {
+        store.patch('photos', photoId, { itemId: others[0].id });
+      }
     }
     store.remove('items', id);
     hooks?.onDataChanged?.('items');
-    return done({ deleted: true, id });
+    return done({ deleted: true, id, removedPhotos });
   }
 
-  /** 删掉一张没挂在任何物品上的照片（面板取消/换图时用）。已被引用就拒绝，避免把记录上的图删空。 */
+  /** 删掉一张没挂在任何物品上的照片（面板取消/换图时用）。已被任何物件引用就拒绝。 */
   async function removePhoto(id) {
+    if (!id) return fail('缺少照片 id');
     const photo = store.find('photos', id);
     if (!photo) return fail(`照片 ${id} 不存在`);
-    if (photo.itemId && store.find('items', photo.itemId)) {
-      const item = store.find('items', photo.itemId);
-      return fail(`这张照片还挂在「${item.name}」上，先从物件里移除再删`);
-    }
-    photos.remove(id);
+    // 以 items.photoIds 为准：photo.itemId 可能是脏数据（过继/历史遗留）
+    const owner = store.list('items').find((item) => (item.photoIds || []).includes(id));
+    if (owner) return fail(`这张照片还挂在「${owner.name}」上，先从物件里移除再删`);
+    photosModule.remove(id);
     hooks?.onDataChanged?.('items');
     return done({ deleted: true, id });
   }
@@ -929,9 +975,32 @@ export function createService({ store, config, kinds, credentials, quota, remind
       }
     }
 
+    // 收纳也要出现在「全貌」里：不然模型不知道有这些记录，用户说「挪到书房了」它只能新建一条
+    const items = store.list('items').slice().sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+    const photoTotal = store.list('photos').length;
+    if (items.length) {
+      lines.push(`\n## 收纳（${items.length} 件，${photoTotal} 张照片）`);
+      for (const item of items.slice(0, 20)) {
+        const qty = item.quantity === null || item.quantity === undefined ? '' : `${item.quantity}${item.unit ? ` ${item.unit}` : ''} · `;
+        const pics = (item.photoIds || []).length ? ` · ${(item.photoIds || []).length} 张照片` : '';
+        lines.push(`- ${item.name} · ${placeLabel(item)} · ${qty}${item.placedAt ? fmtDate(item.placedAt) + ' 放入' : '时间未记'}${pics} · id=${item.id}`);
+      }
+      if (items.length > 20) lines.push(`- （还有 ${items.length - 20} 件，用 butler_item_find 按关键词查）`);
+    } else {
+      lines.push('\n## 收纳（0 件）—— 还没有记过东西放在哪');
+    }
+
     return {
       text: lines.join('\n'),
-      counts: { assets: assets.length, plans: plans.length, todos: todos.length, debts: debts.length, alerts: pendingAlerts.length },
+      counts: {
+        assets: assets.length,
+        plans: plans.length,
+        todos: todos.length,
+        debts: debts.length,
+        alerts: pendingAlerts.length,
+        items: items.length,
+        photos: photoTotal,
+      },
     };
   }
 

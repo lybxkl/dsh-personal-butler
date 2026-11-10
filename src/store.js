@@ -274,18 +274,21 @@ export function normalizeDebt(raw, defaults = {}) {
 export function normalizeItem(raw) {
   const photos = Array.isArray(raw.photoIds) ? raw.photoIds : Array.isArray(raw.photos) ? raw.photos : [];
   const tags = Array.isArray(raw.tags) ? raw.tags : typeof raw.tags === 'string' ? String(raw.tags).split(/[,，\s]+/) : [];
+  const quantityRaw = toNumber(raw.quantity, null);
+  const quantity = quantityRaw === null ? null : Math.max(0, Math.min(1e6, quantityRaw));
   return {
     id: String(raw.id || newId(ID_PREFIX.items)),
     name: safeText(raw.name, 120),
     location: safeText(raw.location, 120),
     detail: safeText(raw.detail, 120), // 柜子第几层、哪个抽屉这类补充
-    quantity: nullableNumber(raw.quantity),
+    quantity,
     unit: safeText(raw.unit, 20),
     category: safeText(raw.category, 40),
     note: safeText(raw.note, 2000),
     tags: [...new Set(tags.map((t) => safeText(t, 24)).filter(Boolean))].slice(0, 20),
     placedAt: toIso(raw.placedAt),
-    photoIds: [...new Set(photos.map((p) => safeText(p, 80)).filter(Boolean))].slice(0, 12),
+    // 只留字符串 id：把整个照片对象塞进来的话，后面 store.find(photos, id) 会全落空
+    photoIds: [...new Set(photos.map((p) => (typeof p === 'string' ? safeText(p, 80) : '')).filter(Boolean))].slice(0, 12),
     source: safeText(raw.source || 'manual', 20),
     createdAt: toIso(raw.createdAt) || nowIso(),
     updatedAt: toIso(raw.updatedAt) || nowIso(),
@@ -294,9 +297,11 @@ export function normalizeItem(raw) {
 
 /** 照片元数据；字节存 <dataDir>/photos/<file>，记录里只留路径与类型。 */
 export function normalizePhoto(raw) {
+  const file = safeText(raw.file, 120);
   return {
     id: String(raw.id || newId(ID_PREFIX.photos)),
-    file: safeText(raw.file, 120),
+    // 文件名必须是服务端生成的样子：数据文件被手改过时，宁可不认这张图，也不能让它指到目录外
+    file: /^ph_[a-z0-9]+\.(?:jpg|png|gif|webp)$/.test(file) ? file : '',
     mime: safeText(raw.mime || 'image/jpeg', 40),
     byteSize: nullableNumber(raw.byteSize),
     itemId: raw.itemId ? String(raw.itemId) : null,

@@ -231,7 +231,9 @@ test('概览：给模型的摘要覆盖四类记录', async () => {
   assert.match(summary.text, /额度（1 个计划）/);
   assert.match(summary.text, /待办（1 项待处理）/);
   assert.match(summary.text, /借贷（1 笔未结清）/);
-  assert.deepEqual(summary.counts, { assets: 1, plans: 1, todos: 1, debts: 1, alerts: summary.counts.alerts });
+  assert.deepEqual(summary.counts, { assets: 1, plans: 1, todos: 1, debts: 1, items: 0, photos: 0, alerts: summary.counts.alerts });
+  // 收纳也要出现在全貌里（否则模型不知道有这些记录）
+  assert.match(summary.text, /收纳（0 件）/);
 
   const empty = makeService().service.summary();
   assert.match(empty.text, /还没有记录任何订阅/);
