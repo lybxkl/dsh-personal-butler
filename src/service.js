@@ -209,7 +209,7 @@ export function createService({ store, config, kinds, credentials, quota, remind
       now: now.getTime(),
       nowIso: now.toISOString(),
       version: '0.1.0',
-      config: pick(config, ['currency', 'pollSeconds', 'advanceMinutes', 'reminderTarget', 'maxSnapshots']),
+      config: pick(config, ['currency', 'pollSeconds', 'advanceMinutes', 'reminderTarget', 'reminderSession', 'maxSnapshots']),
       assets,
       plans,
       todos: snap.todos,
@@ -1072,17 +1072,24 @@ export function createService({ store, config, kinds, credentials, quota, remind
 
   /* ------------------------------ 设置 ------------------------------ */
 
-  function updateSettings(patch) {
+  async function updateSettings(patch) {
     const clean = sanitizePanelConfigPatch(patch);
     if (clean.currency) clean.currency = String(clean.currency).toUpperCase();
     if (!Object.keys(clean).length) return fail('没有可更新的字段');
+    if (clean.reminderTarget === 'session' && !String(clean.reminderSession || config.reminderSession || '').trim()) {
+      return fail('投递到指定会话需要填会话 id（reminderSession）');
+    }
     const overrides = { ...(store.getMeta('settings', {}) || {}), ...clean };
     store.setMeta('settings', overrides);
     const next = deepMerge({ ...config }, clean);
     for (const key of Object.keys(clean)) config[key] = next[key];
     if (clean.pollSeconds !== undefined) hooks?.onPollIntervalChanged?.(Number(config.pollSeconds));
+    // 投递目标变了，已排好的提醒必须重排，否则新设置要等下次改记录才生效
+    if (clean.reminderTarget !== undefined || clean.reminderSession !== undefined) {
+      await reminders.syncAll({ force: true });
+    }
     hooks?.onDataChanged?.('settings');
-    return done({ config: pick(config, ['currency', 'pollSeconds', 'advanceMinutes', 'maxSnapshots']) });
+    return done({ config: pick(config, ['currency', 'pollSeconds', 'advanceMinutes', 'reminderTarget', 'reminderSession', 'maxSnapshots']) });
   }
 
   async function syncReminders(options = {}) {

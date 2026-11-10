@@ -70,7 +70,9 @@ export function normalizeConfig(raw) {
 }
 
 /** 面板可写的配置字段白名单（其余字段只能改 patch 文件）。 */
-export const PANEL_EDITABLE_CONFIG = ['pollSeconds', 'advanceMinutes', 'currency', 'maxSnapshots'];
+export const PANEL_EDITABLE_CONFIG = ['pollSeconds', 'advanceMinutes', 'currency', 'maxSnapshots', 'reminderTarget', 'reminderSession'];
+
+export const REMINDER_TARGETS = ['new_once', 'new', 'session', 'origin'];
 
 export function sanitizePanelConfigPatch(patch) {
   const out = {};
@@ -80,6 +82,17 @@ export function sanitizePanelConfigPatch(patch) {
     if (key === 'currency') {
       const currency = String(patch[key] || '').toUpperCase().slice(0, 8);
       if (currency) out[key] = currency;
+      continue;
+    }
+    if (key === 'reminderTarget') {
+      const target = String(patch[key] || '').trim().toLowerCase();
+      if (REMINDER_TARGETS.includes(target)) out[key] = target;
+      continue;
+    }
+    if (key === 'reminderSession') {
+      // 只收会话 id 的样子，别把路径/命令行塞进来
+      const sessionId = String(patch[key] || '').trim().slice(0, 120);
+      if (!sessionId || /^[a-z0-9][a-z0-9._:-]*$/i.test(sessionId)) out[key] = sessionId;
       continue;
     }
     const bounds = NUMBER_BOUNDS[key];

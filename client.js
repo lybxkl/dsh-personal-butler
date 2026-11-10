@@ -258,7 +258,13 @@
         'settings.currency': '默认币种',
         'settings.reminder': '提醒投递到',
         'settings.reminder.hint': '到期提醒会发到这里，你在会话里回一句就行',
-        'settings.reminder.new_once': '专属提醒会话',
+        'settings.reminder.new_once': '专属提醒会话（不打断当前对话）',
+        'settings.reminder.origin': '记这条时的会话（QQ 里记的就提醒到 QQ）',
+        'settings.reminder.session': '固定某个会话',
+        'settings.reminder.new': '每次新建一个会话',
+        'settings.reminderSaved': '提醒投递方式已更新，已排好的提醒会重排',
+        'settings.reminderSession': '会话 id，如 session-xxxxxxxx',
+        'settings.reminderSessionInvalid': '先填会话 id 再保存',
         'settings.reminder.new': '每次新建会话',
         'settings.reminder.session': '指定会话',
         'settings.advanced': '高级',
@@ -554,7 +560,13 @@
         'settings.currency': 'Default currency',
         'settings.reminder': 'Reminders go to',
         'settings.reminder.hint': 'Due reminders land here; just reply in the session',
-        'settings.reminder.new_once': 'A dedicated reminder session',
+        'settings.reminder.new_once': 'A dedicated reminder session (won’t interrupt this chat)',
+        'settings.reminder.origin': 'The chat where you recorded it (QQ stays QQ)',
+        'settings.reminder.session': 'One fixed session',
+        'settings.reminder.new': 'A brand-new session each time',
+        'settings.reminderSaved': 'Delivery updated — scheduled reminders were rebuilt',
+        'settings.reminderSession': 'Session id, e.g. session-xxxxxxxx',
+        'settings.reminderSessionInvalid': 'Enter a session id first',
         'settings.reminder.new': 'A new session each time',
         'settings.reminder.session': 'A specific session',
         'settings.advanced': 'Advanced',
@@ -4136,6 +4148,20 @@ function ItemsTab(props) {
         var tokenDraft = tokenState[0];
         var setTokenDraft = tokenState[1];
 
+        /* 投递到指定会话时的会话 id 草稿：失焦/点保存才提交 */
+        var sessionState = React.useState('');
+        var sessionDraft = sessionState[0];
+        var setSessionDraft = sessionState[1];
+
+        function saveSession() {
+          var value = String(sessionDraft || '').trim();
+          if (!value) {
+            api.notify(tr('settings.reminderSessionInvalid'), 'error');
+            return;
+          }
+          save({ reminderSession: value }, tr('settings.reminderSaved'));
+        }
+
         function commitSnapshots() {
           if (snapDraft === null) return;
           var raw = String(snapDraft).trim();
@@ -4372,7 +4398,25 @@ function ItemsTab(props) {
                 h(
                   'div',
                   { className: 'btl-settings-ctl' },
-                  h(Chip, { tone: 'muted' }, tr('settings.reminder.' + ((config && config.reminderTarget) || 'new_once'))),
+                  h(Select, {
+                    value: (config && config.reminderTarget) || 'new_once',
+                    options: optionsFrom(['new_once', 'origin', 'session', 'new'], function (value) {
+                      return tr('settings.reminder.' + value);
+                    }),
+                    onChange: function (value) {
+                      save({ reminderTarget: value }, tr('settings.reminderSaved'));
+                    }
+                  }),
+                  config && config.reminderTarget === 'session'
+                    ? h(TextInput, {
+                      value: sessionDraft,
+                      placeholder: tr('settings.reminderSession'),
+                      onChange: setSessionDraft
+                    })
+                    : null,
+                  config && config.reminderTarget === 'session'
+                    ? h(Btn, { variant: 'ghost', size: 'sm', onClick: saveSession }, tr('form.save'))
+                    : null,
                   diagnostics.scheduleAvailable
                     ? null
                     : h(Chip, { tone: 'danger' }, tr('settings.schedule.no'))

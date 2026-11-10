@@ -188,18 +188,18 @@ test('额度计划：busy 时给出明确的跳过原因，而不是假装成功
 
 test('设置：面板改过的值优先，并就地更新共享 config', async () => {
   const { service, config, hooks, store } = makeService();
-  const result = service.updateSettings({ pollSeconds: 90, currency: 'usd' });
+  const result = await service.updateSettings({ pollSeconds: 90, currency: 'usd' });
   assert.equal(result.ok, true);
   assert.equal(config.pollSeconds, 90, '同一个 config 引用要就地更新');
   assert.equal(config.currency, 'USD');
   assert.deepEqual(hooks.polls, [90]);
   assert.equal(store.getMeta('settings').pollSeconds, 90, '覆盖值要落盘');
 
-  const bad = service.updateSettings({ pollSeconds: 99999 });
+  const bad = await service.updateSettings({ pollSeconds: 99999 });
   assert.equal(bad.ok, true);
   assert.equal(config.pollSeconds, 86400, '要被钳到上限');
 
-  assert.equal(service.updateSettings({}).ok, false);
+  assert.equal((await service.updateSettings({})).ok, false);
 });
 
 test('提醒与警报：确认操作幂等', async () => {
@@ -331,4 +331,30 @@ test('续费：不同档位/不同种类不算同一款', async () => {
   const max = await service.upsertAsset({ name: 'Claude Max', amount: 100, currency: 'USD', expiresAt: '2027-01-10 09:00' });
   assert.equal(max.data.renewed, false);
   assert.equal(store.list('assets').length, 2);
+});
+
+test('设置：提醒投递方式可在面板改，改完立刻重排提醒', async () => {
+  const { service, config, store } = makeService();
+
+  const noId = await service.updateSettings({ reminderTarget: 'session' });
+  assert.equal(noId.ok, false);
+  assert.match(noId.error, /会话 id/);
+
+  const toOrigin = await service.updateSettings({ reminderTarget: 'origin' });
+  assert.equal(toOrigin.ok, true);
+  assert.equal(config.reminderTarget, 'origin');
+  assert.equal(toOrigin.data.config.reminderTarget, 'origin');
+  assert.equal(store.getMeta('settings').reminderTarget, 'origin');
+
+  const back = await service.updateSettings({ reminderTarget: 'new_once' });
+  assert.equal(back.ok, true);
+  assert.equal(config.reminderTarget, 'new_once');
+
+  const bad = await service.updateSettings({ reminderTarget: 'whatever' });
+  assert.equal(bad.ok, false);
+  assert.equal(config.reminderTarget, 'new_once');
+
+  const withId = await service.updateSettings({ reminderTarget: 'session', reminderSession: 'session-abc-1' });
+  assert.equal(withId.ok, true);
+  assert.equal(config.reminderSession, 'session-abc-1');
 });

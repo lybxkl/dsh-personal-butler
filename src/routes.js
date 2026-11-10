@@ -158,8 +158,8 @@ export function registerRoutes(ctx, service, helpers) {
     {
       path: `${basePath}/api/settings`,
       method: 'POST',
-      handler: (body) => {
-        const result = service.updateSettings(body.patch || body);
+      handler: async (body) => {
+        const result = await service.updateSettings(body.patch || body);
         if (!result.ok) return { status: 400, payload: { ok: false, error: result.error } };
         return { ok: true, ...result.data, state: service.state() };
       },
