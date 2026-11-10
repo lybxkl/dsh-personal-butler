@@ -16,7 +16,7 @@ const MIN_DELAY_SECONDS = 1;
 const MIN_USEFUL_MS = 2000;
 // 提醒正文改过之后，老任务必须重建（否则已排期的任务还挂着旧文案、旧工具名）。
 // 改动提醒文案时把这个版本号 +1，下次 syncAll 会自动重建一遍。
-const PROMPT_VERSION = 2;
+const PROMPT_VERSION = 3;
 
 /** schedule.create 的 timing 入参在不同版本里可能是 at/scheduledAt 或 after_seconds，按顺序试一次并记住可用形状。 */
 const TIMING_SHAPES = ['at', 'scheduledAt', 'atMs', 'afterSnake', 'afterCamel'];
@@ -174,16 +174,17 @@ export function createReminders({ store, config, logger, getSchedule, onChange }
         `[管家提前提醒] ${describeItem(collection, record)} 约定时间：${due}（${delta}）。`,
         '请依次做三件事，不要复述这条消息的措辞：',
         `1. 先用 butler_query 读一次这条记录的最新状态（collection=${collection}，id=${record.id}），确认它还没被处理；`,
-        `2. 用 ask_user_question 提前问一次，让用户现在就选：现在就处理 / 稍后再提醒 10 分钟 / 推迟到今晚 / 已经处理完了${actionHint}；`,
-        '3. 按用户的选择更新记录，不要自作主张改动金额与时间。',
+        '2. 用 butler_ask 建一条待确认：question 写「这条要不要现在处理？」，options 给 [现在就处理, 稍后再提醒 10 分钟, 推迟到今晚, 已经处理完了]；',
+        '   把它返回的 text 原样发给用户 —— 这段带 1/2/3 编号，用户在 QQ / 手机上直接回数字也能对上；能弹卡片就顺手弹一张，但文字必须有。',
+        `3. 用户回数字后先 butler_pending_resolve 处理，再按结果更新记录${actionHint}；不要自作主张改动金额与时间。`,
       ].join('\n');
     }
 
     return [
       `[管家到点提醒·加强] ${describeItem(collection, record)} 已经到时间：${due}（${delta}）。`,
-      '这是到点提醒，请立刻用 ask_user_question 弹一张确认卡，让用户当场表态，选项必须包含：已处理完 / 我这就去 / 延后 10 分钟 / 延后到明天。',
-      '不要只发一条消息等用户自己看见——必须让用户做出选择后才算完成这次提醒。',
-      `用户表态后按结果更新记录（collection=${collection}，id=${record.id}）${actionHint}；如果用户选择延后，把新的 dueAt 设置好，本插件会自动重建下一条提醒。`,
+      '这是到点提醒：用 butler_ask 建一条待确认（options 给 [已处理完, 我这就去, 延后 10 分钟, 延后到明天]），把返回的 text 原样发给用户。',
+      '如果当前通道能弹卡片，可以同时弹一张 ask_user_question；但必须带 1/2/3 编号文字 —— 只弹卡片、用户在手机上点不到就等于没提醒。',
+      `用户回数字后先 butler_pending_resolve，再按结果更新记录（collection=${collection}，id=${record.id}）${actionHint}；如果延后，把新的 dueAt 设置好，本插件会自动重建下一条提醒。`,
     ].join('\n');
   }
 

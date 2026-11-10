@@ -215,6 +215,7 @@ export function createService({ store, config, kinds, credentials, quota, remind
       todos: snap.todos,
       debts: snap.debts,
       items: snap.items.map(itemView),
+      pending: (() => { expirePending(); return store.list('pending').filter((p) => p.status === 'open').map(pendingView); })(),
       alerts: alerts.view(),
       kinds: kinds.view(),
       summary: {
@@ -226,6 +227,7 @@ export function createService({ store, config, kinds, credentials, quota, remind
         itemCount: snap.items.length,
         photoCount: snap.photos.length,
         alertPending: alerts.pendingCount(),
+        pendingCount: store.list('pending').filter((p) => p.status === 'open').length,
         subscriptionTotals: totals.byCurrency || {},
         debtTotals,
       },
@@ -260,6 +262,194 @@ export function createService({ store, config, kinds, credentials, quota, remind
     } catch {
       return { kind: 'other', autoRegistered: false };
     }
+  }
+
+  /* ------------------------- 待确认（跨通道选择） ------------------------- */
+
+  function pendingView(record) {
+    const expired = record.status === 'open' && Date.parse(record.expiresAt) <= Date.now();
+    const options = record.options.map((option, index) => ({
+      ...option,
+      index: index + 1,
+      label: `${index + 1}. ${option.label}`,
+    }));
+    return {
+      ...record,
+      status: expired ? 'expired' : record.status,
+      expired,
+      options,
+      optionsText: options.map((option) => option.label).join('\n'),
+      hasPayload: Boolean(record.payload && record.payload.collection),
+    };
+  }
+
+  /** 把过了期的待确认标成 expired，免得列表里永远躺着没人能回答的问题。 */
+  /** 已处理完的待确认只留 7 天，最多 200 条：它们只是历史，不该无限涨。 */
+  function prunePending() {
+    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    let removed = 0;
+    for (const record of store.list('pending')) {
+      if (record.status === 'open') continue;
+      const at = Date.parse(record.resolvedAt || record.createdAt);
+      if (!Number.isNaN(at) && at < cutoff) {
+        store.remove('pending', record.id);
+        removed += 1;
+      }
+    }
+    const sorted = store.list('pending').sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+    if (sorted.length > 200) {
+      for (const record of sorted.slice(0, sorted.length - 200)) {
+        store.remove('pending', record.id);
+        removed += 1;
+      }
+    }
+    return removed;
+  }
+
+  function expirePending() {
+    prunePending();
+    const now = Date.now();
+    let changed = 0;
+    for (const record of store.list('pending')) {
+      if (record.status !== 'open') continue;
+      if (Date.parse(record.expiresAt) > now) continue;
+      store.patch('pending', record.id, { status: 'expired' });
+      changed += 1;
+    }
+    return changed;
+  }
+
+  function pendingText(view) {
+    const title = view.title ? `【${view.title}】` : '【需要你确认】';
+    const minutes = Math.max(1, Math.round((Date.parse(view.expiresAt) - Date.now()) / 60000));
+    return [
+      `${title}${view.question}`,
+      ...view.options.map((option) => option.label),
+      `直接回数字就行（比如「1」）。这条 ${minutes} 分钟内有效，过期就不作数了。`,
+    ].join('\n');
+  }
+
+  async function createPending(input = {}) {
+    const question = String(input.question || '').trim();
+    if (!question) return fail('要问什么？question 不能为空');
+    const rawOptions = Array.isArray(input.options) ? input.options : [];
+    if (rawOptions.length < 2) return fail('至少给两个选项，用户才有得选');
+    if (rawOptions.length > 8) return fail('选项最多 8 个，太长了手机上不好回');
+
+    let payload = null;
+    if (input.collection) {
+      if (!COLLECTIONS.includes(input.collection)) return fail(`collection 必须是 ${COLLECTIONS.join(' / ')}`);
+      const op = String(input.op || 'create');
+      if (!['create', 'update', 'delete'].includes(op)) return fail('op 只能是 create / update / delete');
+      if (op === 'delete' && !input.id) return fail('delete 要带 id');
+      if (op !== 'delete' && (!input.record || typeof input.record !== 'object')) return fail('要落地就得带 record（记录内容）');
+      payload = { collection: input.collection, op, id: input.id || null, record: op === 'delete' ? null : input.record };
+    }
+
+    const hasApplies = rawOptions.some((option) => option && typeof option === 'object' && option.applies);
+    const options = rawOptions.map((option, index) => {
+      if (typeof option === 'string') {
+        return { label: option, applies: Boolean(payload) && !hasApplies && index === 0 };
+      }
+      return { label: String(option.label || ''), applies: Boolean(option.applies) };
+    });
+    if (options.some((option) => !option.label)) return fail('每个选项都要有 label');
+
+    const record = store.put('pending', {
+      title: input.title || '',
+      question,
+      options,
+      payload,
+      status: 'open',
+      source: input.source || 'model',
+      ttlMinutes: input.ttlMinutes,
+    });
+    const view = pendingView(record);
+    return done({ pending: view, text: pendingText(view) });
+  }
+
+  function listPending(input = {}) {
+    expirePending();
+    const status = input.status || 'open';
+    const limit = Math.min(50, Math.max(1, Math.round(Number(input.limit) || 20)));
+    const views = store
+      .list('pending')
+      .filter((record) => (status === 'all' ? true : record.status === status))
+      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+      .slice(0, limit)
+      .map(pendingView);
+    const digest = views
+      .map((view) => `- id=${view.id} · ${view.title ? `【${view.title}】` : ''}${view.question}`
+        + `\n  选项：${view.options.map((option) => option.label).join(' / ')}`
+        + `\n  有效期到 ${toIso(view.expiresAt)}（status=${view.status}）`)
+      .join('\n');
+    const text = views.length === 0 ? '没有待确认的问题。' : `待确认 ${views.length} 条：\n${digest}`;
+    return done({ pending: views, count: views.length, text });
+  }
+
+  /** 用户回的「1」/「2. 改一下」/某个选项原文，都要能对上。 */
+  function matchOption(options, choice) {
+    const text = String(choice ?? '').trim();
+    if (!text) return null;
+    const numeric = text.match(/^(\d{1,2})(?:[.、,，)）\s]|$)/);
+    if (numeric) {
+      const picked = options[Number(numeric[1]) - 1];
+      if (picked) return picked;
+    }
+    const lower = text.toLowerCase();
+    return options.find((option) => option.label.toLowerCase() === lower) || null;
+  }
+
+  async function resolvePending(input = {}) {
+    const id = String(input.id || '').trim();
+    if (!id) return fail('要回答哪一条？请带 id（可以先 butler_pending_list 看）');
+    const record = store.find('pending', id);
+    if (!record) return fail(`待确认 ${id} 不存在（可能已经被处理或过期清掉了）`);
+    expirePending();
+    const current = store.find('pending', id) || record;
+    if (current.status !== 'open') {
+      return fail(`这条已经${current.status === 'expired' ? '过期了' : '处理过了'}（${current.status}），不用再回`);
+    }
+    const chosen = matchOption(current.options, input.choice);
+    if (!chosen) {
+      const view = pendingView(current);
+      return fail(`「${String(input.choice ?? '').trim() || '空回答'}」对不上选项。可回：${view.options.map((option, index) => `${index + 1}=${current.options[index].label}`).join(' / ')}`);
+    }
+
+    let applied = null;
+    if (chosen.applies && current.payload && current.payload.collection) {
+      const { collection, op, id: targetId, record: payloadRecord } = current.payload;
+      const result = await mutate({ collection, op, id: op === 'create' ? null : targetId, record: payloadRecord });
+      if (!result.ok) {
+        return fail(`选项选好了，但落库失败：${result.error}（这条还开着，可以改完再回）`);
+      }
+      applied = result.data?.record || null;
+    }
+
+    const patched = store.patch('pending', current.id, {
+      status: applied ? 'applied' : 'answered',
+      choice: chosen.label,
+      resultId: applied ? applied.id : null,
+      resolvedAt: new Date().toISOString(),
+    });
+    const view = pendingView(patched);
+    return done({
+      pending: view,
+      applied,
+      text: applied
+        ? `已按「${chosen.label}」处理：${applied.name || applied.title || applied.id}`
+        : `记下你的选择：${chosen.label}`,
+    });
+  }
+
+  function cancelPending(input = {}) {
+    const id = String(input.id || '').trim();
+    if (!id) return fail('要取消哪一条？请带 id');
+    const record = store.find('pending', id);
+    if (!record) return fail(`待确认 ${id} 不存在`);
+    if (record.status !== 'open') return fail(`这条已经是 ${record.status}，不用再取消`);
+    const patched = store.patch('pending', id, { status: 'cancelled', resolvedAt: new Date().toISOString() });
+    return done({ pending: pendingView(patched), text: '已取消这条待确认。' });
   }
 
   async function upsertAsset(input) {
@@ -1010,6 +1200,10 @@ export function createService({ store, config, kinds, credentials, quota, remind
     query,
     mutate,
     removeRecord,
+    createPending,
+    listPending,
+    resolvePending,
+    cancelPending,
     upsertAsset,
     upsertPlan,
     upsertTodo,

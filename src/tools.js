@@ -678,6 +678,99 @@ export function registerTools(ctx, service, helpers) {
     },
   }));
 
+  register(defineTool({
+    name: 'butler_ask',
+    description: '把一次「要用户在几个选项里选一个」的提问落盘，并返回一段可以直接发给用户的编号文本（1/2/3…）。'
+      + '用户在 QQ、微信、手机上看不到选项卡片时就用它：文本发过去，用户在任意会话里回「1」，'
+      + '你用 butler_pending_resolve 就能对上同一条，不依赖卡片。'
+      + '需要确认后直接落库（记资产/待办/借贷、改时间）时，把 collection + op + record（JSON 字符串）一起带上，'
+      + '并把第一个选项（也就是「就按这个记」）设成 applies:true —— 用户回 1 就直接写入。'
+      + '用法：先 butler_ask 拿到 text，再把 text 原样回复给用户（不要自己重排编号）。',
+    parameters: {
+      question: { type: 'string', required: true, description: '要问用户的话，一句话说清（如「这笔订阅记成这样对吗？」）' },
+      options: { type: 'array', description: '选项数组，2~8 个；字符串如 ["对，就这样记","金额不对","日期不对"]，也可以是对象 {"label":"…","applies":true}' },
+      title: { type: 'string', description: '短标题，显示成【标题】，如「确认订阅」；可留空' },
+      collection: { type: 'string', description: '选项 1 要落到哪张表：assets / plans / todos / debts / items；不落库就不传' },
+      op: { type: 'string', description: 'create（默认）/ update / delete' },
+      record: { type: 'string', description: '要写入的记录内容，JSON 字符串（如 {"name":"Claude Pro","amount":20,"cycle":"monthly"}）；delete 时不用传' },
+      id: { type: 'string', description: 'update / delete 的目标 id' },
+      ttlMinutes: { type: 'number', description: '多少分钟内有效，默认 120，最大 1440' },
+      source: { type: 'string', description: '来源：screenshot | manual | model' },
+    },
+    output: {
+      schema: { type: 'json' },
+      render: (args, value) => (value?.ok === true
+        ? [{ type: 'text', text: `${value.text}\n\n[内部] 待确认 id=${value.id}，用户回答后用 butler_pending_resolve(id, choice) 处理；上面这段才是发给用户看的。` }]
+        : text(value)),
+    },
+    async execute(args) {
+      const input = { ...args };
+      if (typeof input.record === 'string') {
+        try {
+          input.record = JSON.parse(input.record);
+        } catch {
+          return { ok: false, error: 'record 不是合法 JSON，检查一下引号/逗号' };
+        }
+      }
+      const result = await service.createPending(input);
+      if (!result.ok) return result;
+      return {
+        ok: true,
+        id: result.data.pending.id,
+        text: result.data.text,
+        expiresAt: result.data.pending.expiresAt,
+        hint: '把 text 原样发给用户。用户回数字（或选项原文）后，调 butler_pending_resolve。',
+      };
+    },
+  }));
+
+  register(defineTool({
+    name: 'butler_pending_list',
+    description: '看现在有哪些还没回答的待确认问题（跨会话有效，QQ 里问的、Web 里问的都在这里）。'
+      + '收到用户一条含义不明的短回复（「1」「好」「行」「改一下」）时，先调它看看是不是在回答某个问题。',
+    parameters: {
+      status: { type: 'string', description: 'open（默认）/ answered / applied / cancelled / expired / all' },
+      limit: { type: 'number', description: '最多几条，默认 20' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => text(value) },
+    async execute(args) {
+      const result = service.listPending(args);
+      if (!result.ok) return result;
+      return { ok: true, count: result.data.count, pending: result.data.pending, text: result.data.text };
+    },
+  }));
+
+  register(defineTool({
+    name: 'butler_pending_resolve',
+    description: '回答一条待确认：choice 可以是编号（1/2/3）、选项原文，或「2. 改日期」这种。'
+      + '如果这条带着要落库的内容、且选中的选项标记了 applies，会直接把记录写进去并告诉你结果。'
+      + '回答不上就把它返回的可选列表原样回给用户，不要自己猜。',
+    parameters: {
+      id: { type: 'string', required: true, description: '待确认 id（butler_pending_list 里的 id）' },
+      choice: { type: 'string', required: true, description: '用户的选择：1 / 2 / 选项原文' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => text(value) },
+    async execute(args) {
+      const result = await service.resolvePending(args);
+      if (!result.ok) return result;
+      return { ok: true, applied: result.data.applied, text: result.data.text, pending: result.data.pending };
+    },
+  }));
+
+  register(defineTool({
+    name: 'butler_pending_cancel',
+    description: '取消一条待确认（用户改主意了、或者问了但已经不需要了）。',
+    parameters: {
+      id: { type: 'string', required: true, description: '待确认 id' },
+    },
+    output: { schema: { type: 'json' }, render: (args, value) => text(value) },
+    async execute(args) {
+      const result = service.cancelPending(args);
+      if (!result.ok) return result;
+      return { ok: true, text: result.data.text, pending: result.data.pending };
+    },
+  }));
+
   return () => {
     for (const dispose of disposers) {
       try {

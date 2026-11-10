@@ -18,7 +18,7 @@ import { nowIso, newId, pick, toIso, toNumber, safeText } from './util.js';
 
 export const SCHEMA_VERSION = 1;
 
-export const COLLECTIONS = ['assets', 'plans', 'todos', 'debts', 'items', 'photos', 'snapshots', 'alerts', 'kinds', 'sources'];
+export const COLLECTIONS = ['assets', 'plans', 'todos', 'debts', 'items', 'photos', 'snapshots', 'alerts', 'kinds', 'sources', 'pending'];
 
 const ID_PREFIX = {
   assets: 'asset',
@@ -31,6 +31,7 @@ const ID_PREFIX = {
   alerts: 'alert',
   kinds: 'kind',
   sources: 'custom:src',
+  pending: 'pend',
 };
 
 function emptyData() {
@@ -48,6 +49,7 @@ function emptyData() {
     alerts: [],
     kinds: [],
     sources: [],
+    pending: [],
     meta: {},
   };
 }
@@ -309,6 +311,51 @@ export function normalizePhoto(raw) {
   };
 }
 
+const PENDING_STATUS = ['open', 'answered', 'applied', 'cancelled', 'expired'];
+
+/**
+ * 待确认项：一次「需要用户选一个选项」的提问，落盘保存，
+ * 这样不管用户在 Web 卡片里点、还是在 QQ/微信里回一个编号，都能对上同一条。
+ */
+export function normalizePending(raw) {
+  const createdAt = toIso(raw.createdAt) || nowIso();
+  const ttlMinutes = Math.min(24 * 60, Math.max(5, Math.round(nullableNumber(raw.ttlMinutes) ?? 120)));
+  const rawOptions = Array.isArray(raw.options) ? raw.options : [];
+  const options = rawOptions
+    .slice(0, 8)
+    .map((option, index) => {
+      const value = typeof option === 'string' ? { label: option } : (option || {});
+      return {
+        key: String(value.key || index + 1),
+        label: safeText(value.label, 120),
+        applies: Boolean(value.applies),
+      };
+    })
+    .filter((option) => option.label);
+  const payload = raw.payload && typeof raw.payload === 'object' ? raw.payload : null;
+  return {
+    id: String(raw.id || newId(ID_PREFIX.pending)),
+    title: safeText(raw.title, 80),
+    question: safeText(raw.question, 400),
+    options,
+    payload: payload
+      ? {
+        collection: safeText(payload.collection, 20),
+        op: safeText(payload.op, 10),
+        id: payload.id ? String(payload.id) : null,
+        record: payload.record && typeof payload.record === 'object' ? payload.record : null,
+      }
+      : null,
+    status: normalizeEnum(raw.status, PENDING_STATUS) || 'open',
+    choice: safeText(raw.choice, 120),
+    resultId: raw.resultId ? String(raw.resultId) : null,
+    source: safeText(raw.source, 20),
+    createdAt,
+    expiresAt: toIso(raw.expiresAt) || new Date(Date.parse(createdAt) + ttlMinutes * 60 * 1000).toISOString(),
+    resolvedAt: toIso(raw.resolvedAt) || null,
+  };
+}
+
 export function normalizeAlert(raw, defaults = {}) {
   return {
     id: String(raw.id || newId(ID_PREFIX.alerts)),
@@ -367,6 +414,7 @@ const NORMALIZER = {
   debts: normalizeDebt,
   items: normalizeItem,
   photos: normalizePhoto,
+  pending: normalizePending,
   alerts: normalizeAlert,
   kinds: normalizeKind,
   sources: normalizeSource,
@@ -542,6 +590,8 @@ export class Store {
       snapshots: this.data.snapshots,
       alerts: this.data.alerts,
       kinds: this.data.kinds,
+      sources: this.data.sources,
+      pending: this.data.pending,
       meta: this.data.meta,
     }));
   }

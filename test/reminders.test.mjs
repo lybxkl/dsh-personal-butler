@@ -234,5 +234,5 @@ test('提醒：正文版本号参与幂等签名，改文案会让老任务重�
   const result = await reminders.syncItem('todos', store.find('todos', todo.id));
   assert.equal(result.status, 'created');
   assert.ok(calls.some((c) => c.op === 'edit'));
-  assert.match(store.find('todos', todo.id).reminder.sig, /^v2\|/);
+  assert.match(store.find('todos', todo.id).reminder.sig, /^v3\|/);
 });
