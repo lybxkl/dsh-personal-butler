@@ -948,6 +948,12 @@ export function createService({ store, config, kinds, credentials, quota, remind
     let removed = 0;
     let retained = 0;
     for (const photoId of ids) {
+      const photo = store.find('photos', photoId);
+      // 归属还指着另一个物件（且那个物件确实存在）时不要删，哪怕它没写进对方的 photoIds
+      if (photo && photo.itemId && photo.itemId !== keepItemId && store.find('items', photo.itemId)) {
+        retained += 1;
+        continue;
+      }
       const other = store.list('items').find((item) => item.id !== keepItemId && (item.photoIds || []).includes(photoId));
       if (other) {
         store.patch('photos', photoId, { itemId: other.id });
@@ -1023,6 +1029,10 @@ export function createService({ store, config, kinds, credentials, quota, remind
 
     const copies = [];
     let resolved;
+    // 过期的照片 id（比如模型从旧的 butler_item_find 回话里抄来的）不该让整条收纳写入失败：
+    // 照片是辅助信息，不认识的就丢掉并告诉模型，物品本身照常记。
+    const unknown = nextIds.filter((id) => !store.find('photos', id));
+    nextIds = nextIds.filter((id) => store.find('photos', id));
     try {
       resolved = resolvePhotoIds(claimPhotoIds(nextIds, ownerId, copies), ownerId);
     } catch (error) {
@@ -1056,8 +1066,8 @@ export function createService({ store, config, kinds, credentials, quota, remind
       record: view,
       ...(cleaned.removed ? { removedPhotos: cleaned.removed } : {}),
       ...(cleaned.retained ? { retainedPhotos: cleaned.retained } : {}),
-      ...(record.photoIds.length < photoIds.length
-        ? { warning: `有 ${photoIds.length - record.photoIds.length} 张照片找不到，已经忽略` }
+      ...(unknown.length
+        ? { warning: `有 ${unknown.length} 张照片已经找不到了（${unknown.slice(0, 3).join('、')}），已经忽略；其它内容照常记下` }
         : {}),
     });
   }

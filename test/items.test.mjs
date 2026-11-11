@@ -585,3 +585,16 @@ test('照片：photoIds 传 null 与不传一样，都表示「这次不动照�
   assert.equal(updated.ok, true);
   assert.equal(updated.data.record.photoCount, 1);
 });
+
+test('照片：过期的照片 id 不该让整条收纳写入失败，只忽略并回一句警告', async () => {
+  const { service, photos } = makeService();
+  const photo = photos.saveDataUrl('data:image/png;base64,' + PNG_BASE64);
+  const created = await service.upsertItem({
+    name: '插线板',
+    location: '书桌下面',
+    photoIds: ['ph_expired', photo.id],
+  });
+  assert.equal(created.ok, true);
+  assert.equal(created.data.record.photoCount, 1);
+  assert.match(created.data.warning, /1 张照片已经找不到了/);
+});
