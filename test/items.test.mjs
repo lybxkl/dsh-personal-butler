@@ -404,6 +404,9 @@ test('照片：路径不存在、不是图片、超大文件都要明确失败',
   assert.throws(() => narrow.saveFile(huge), /太大/);
 });
 
+// 假域名不联网：给一个公网地址让校验通过，真正的响应由 fetchImpl 提供
+const fakeLookup = async () => [{ address: '93.184.216.34', family: 4 }];
+
 test('照片：远程图片链接会先下载再按字节校验，并按链接去重', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'butler-url-'));
   const store = new Store({ filePath: join(dir, 'butler.json') }).load();
@@ -429,7 +432,7 @@ test('照片：远程图片链接会先下载再按字节校验，并按链接�
 test('照片：远程链接的异常都明确失败（协议 / 状态码 / 非图片 / 超大 / 跳转）', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'butler-url-bad-'));
   const store = new Store({ filePath: join(dir, 'butler.json') }).load();
-  const make = (impl) => createPhotos({ dir, store, fetchImpl: impl });
+  const make = (impl) => createPhotos({ dir, store, fetchImpl: impl, lookupImpl: fakeLookup });
 
   await assert.rejects(() => make(async () => new Response('')).saveUrl('file:///etc/passwd'), /http\/https/);
 
@@ -506,6 +509,7 @@ test('照片链接：302 跳到内网地址也会被拦下（逐跳校验，不�
       hits += 1;
       return new Response('', { status: 302, headers: { location: 'http://169.254.169.254/latest/meta-data/x.png' } });
     },
+    lookupImpl: fakeLookup,
   });
   await assert.rejects(() => photos.saveUrl('https://public.example.com/a.png'), /本机或内网/);
   // 第二跳根本没发出去
@@ -622,4 +626,19 @@ test('照片：过期的照片 id 不该让整条收纳写入失败，只忽略�
   assert.equal(created.ok, true);
   assert.equal(created.data.record.photoCount, 1);
   assert.match(created.data.warning, /1 张照片已经找不到了/);
+});
+
+test('照片链接：生产路径把连接钉在校验过的 IP 上（DNS 说内网就不连）', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'butler-pin-'));
+  const store = new Store({ filePath: join(dir, 'butler.json') }).load();
+  const photos = createPhotos({
+    dir,
+    store,
+    lookupImpl: async () => [{ address: '10.1.2.3', family: 4 }],
+  });
+  // 域名本身看着很公网，但解析出来是内网地址：必须在发请求前就拒绝
+  await assert.rejects(() => photos.saveUrl('https://looks-public.example.org/a.png'), /内网地址/);
+  // 解析失败也要说清楚是解析失败，不要假装是别的问题
+  const broken = createPhotos({ dir, store, lookupImpl: async () => { throw new Error('boom'); } });
+  await assert.rejects(() => broken.saveUrl('https://nx.example.org/a.png'), /域名解析失败/);
 });

@@ -16,6 +16,8 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
@@ -103,24 +105,26 @@ function hostIsPrivate(hostname) {
 }
 
 /**
- * 真正发请求前逐个主机校验：字面量直接判，域名先解析再判（解析失败就交给 fetch 报错）。
- * 光看字符串挡不住「域名解析到 127.0.0.1 / 169.254.169.254」这类写法。
+ * 解析域名并逐个校验，返回可用的公网地址；字面量直接返回。
+ * 返回地址是为了把连接钉在「已校验过的 IP」上，堵住 DNS rebinding（校验时解析成公网、真连接时又解析成内网）。
  */
-async function assertPublicHost(hostname) {
+async function publicAddresses(hostname, lookupFn = lookup) {
   const host = normalizeHost(hostname);
   if (hostIsPrivate(host)) throw new Error('图片链接指向本机或内网地址，已拒绝');
-  if (isIP(host)) return;
-  let addresses;
+  if (isIP(host)) return [host];
+  let list;
   try {
-    addresses = await dns.lookup(host, { all: true });
-  } catch {
-    return;
+    list = await lookupFn(host, { all: true });
+  } catch (error) {
+    throw new Error(`图片链接的域名解析失败（${host}）：${error?.code || error?.message || error}`);
   }
-  for (const one of addresses) {
-    if (hostIsPrivate(one.address)) {
-      throw new Error(`图片链接的域名解析到了内网地址（${one.address}），已拒绝`);
-    }
+  const addresses = [];
+  for (const one of list) {
+    if (hostIsPrivate(one.address)) throw new Error(`图片链接的域名解析到了内网地址（${one.address}），已拒绝`);
+    addresses.push(one.address);
   }
+  if (!addresses.length) throw new Error(`图片链接的域名解析不到地址（${host}）`);
+  return addresses;
 }
 
 export const MAX_PHOTO_BYTES = 50 * 1024 * 1024;
@@ -179,8 +183,10 @@ export function verifyPhotoSignature(id, query, secret) {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-export function createPhotos({ dir, store, logger, secret = '', fetchImpl = null, fileRoots = null, maxBytes = MAX_PHOTO_BYTES }) {
+export function createPhotos({ dir, store, logger, secret = '', fetchImpl = null, lookupImpl = lookup, fileRoots = null, maxBytes = MAX_PHOTO_BYTES }) {
   // 单张上限可注入：测试用一个小值就能覆盖「超限」分支，不必真的写 50MB 文件
+  // lookupImpl 也可注入：测试里给假域名一个公网地址，既不联网又能走完整的校验分支
+  const resolveHost = (hostname) => publicAddresses(hostname, lookupImpl);
   const limit = Number.isFinite(maxBytes) && maxBytes > 0 ? maxBytes : MAX_PHOTO_BYTES;
   const sizeError = (bytes) => `图片太大了（${Math.round(bytes / 1024)}KB，上限 ${Math.round(limit / 1024 / 1024 * 10) / 10}MB）`;
   const root = join(dir, 'photos');
@@ -303,10 +309,9 @@ export function createPhotos({ dir, store, logger, secret = '', fetchImpl = null
   /**
    * 从远程地址保存（QQ 机器人有时把图片给成 https://multimedia.nt.qq.com.cn/download?... 这种链接）。
    * 只接受 http/https，超时 + 体积上限，重定向**逐跳**校验协议与主机；拿到的字节仍然要过 magic bytes 嗅探。
+   * 默认走 `downloadPinned`：先解析并校验域名，再把连接钉在已校验的 IP 上，避免校验与连接之间被 DNS rebinding 换成内网地址。
    */
   async function saveUrl(rawUrl, { itemId = null, timeoutMs = 5 * 60 * 1000 } = {}) {
-    const doFetch = fetchImpl || globalThis.fetch;
-    if (typeof doFetch !== 'function') throw new Error('当前宿主没有可用的网络请求能力，读不了这个图片链接');
     let current;
     try {
       current = new URL(String(rawUrl || ''));
@@ -318,30 +323,142 @@ export function createPhotos({ dir, store, logger, secret = '', fetchImpl = null
     const key = shortKey('url:', current.href);
     const seen = store.list('photos').find((photo) => photo.refId === key);
     if (seen) return seen;
+    const buffer = fetchImpl
+      ? await downloadViaFetch(current, { timeoutMs })
+      : await downloadPinned(current, { timeoutMs });
+    return saveBuffer({ data: buffer, itemId, refId: key });
+  }
+
+  /** 测试注入 fetch 时走这条（不需要真的联网）；每一跳都重新校验主机。 */
+  async function downloadViaFetch(start, { timeoutMs }) {
+    let current = start;
     for (let hop = 0; hop <= 3; hop += 1) {
       // 每一跳都要重新校验：否则一个公网地址 302 到 127.0.0.1 / 169.254.169.254 就能把管家当跳板
-      await assertPublicHost(current.hostname);
-      const response = await doFetch(current.href, {
+      await resolveHost(current.hostname);
+      const response = await fetchImpl(current.href, {
         redirect: 'manual',
         signal: AbortSignal.timeout(timeoutMs),
         headers: { accept: 'image/*' },
       });
       if (response.status >= 300 && response.status < 400) {
         await response.body?.cancel?.().catch?.(() => {});
-        const location = response.headers?.get?.('location');
-        if (!location) throw new Error(`图片链接跳转没有目标（HTTP ${response.status}）`);
-        const next = new URL(location, current);
-        if (next.protocol !== 'http:' && next.protocol !== 'https:') throw new Error('图片链接跳转到了不支持的协议');
-        current = next;
+        current = nextHop(current, response.headers?.get?.('location'), response.status);
         continue;
       }
       if (!response.ok) throw new Error(`下载图片失败（HTTP ${response.status}）`);
       const declared = Number(response.headers?.get?.('content-length'));
       if (Number.isFinite(declared) && declared > limit) throw new Error(sizeError(declared));
-      const buffer = await readBodyLimited(response, limit);
-      return saveBuffer({ data: buffer, itemId, refId: key });
+      return readBodyLimited(response, limit);
     }
     throw new Error('图片链接跳转太多次了（最多 3 跳）');
+  }
+
+  /**
+   * 生产路径：用 node:http(s) 直接发请求，并把 `lookup` 换成「只返回已校验过的地址」，
+   * 这样内核不会在连接时再做一次可能被污染的 DNS 解析。逐跳执行同样的校验。
+   */
+  async function downloadPinned(start, { timeoutMs }) {
+    let current = start;
+    for (let hop = 0; hop <= 3; hop += 1) {
+      const addresses = await resolveHost(current.hostname);
+      const result = await requestOnce(current, { addresses, timeoutMs });
+      if (result.buffer) return result.buffer;
+      current = nextHop(current, result.location, result.status);
+    }
+    throw new Error('图片链接跳转太多次了（最多 3 跳）');
+  }
+
+  /** 解析一次跳转目标，只允许 http/https。 */
+  function nextHop(current, location, status) {
+    if (!location) throw new Error(`图片链接跳转没有目标（HTTP ${status}）`);
+    let next;
+    try {
+      next = new URL(location, current);
+    } catch {
+      throw new Error('图片链接跳转的目标格式不对');
+    }
+    if (next.protocol !== 'http:' && next.protocol !== 'https:') throw new Error('图片链接跳转到了不支持的协议');
+    return next;
+  }
+
+  /** 只回已校验地址的 lookup：内核拿到的就是刚才校验过的那个 IP。 */
+  function pinnedLookup(addresses) {
+    return (hostname, options, callback) => {
+      const done = typeof options === 'function' ? options : callback;
+      if (typeof done !== 'function') return undefined;
+      if (!addresses.length) {
+        done(new Error('没有可用的地址'));
+        return undefined;
+      }
+      const list = addresses.map((address) => ({ address, family: isIP(address) }));
+      // Node 18+ 默认开启 autoSelectFamily，会用 all:true 问全部地址；两种形状都要给对，否则内核拿到 undefined
+      if (options && typeof options === 'object' && options.all) {
+        done(null, list);
+        return undefined;
+      }
+      return done(null, list[0].address, list[0].family);
+    };
+  }
+
+  /** 发一次请求，返回 { buffer } 或 { status, location }（跳转）。 */
+  function requestOnce(url, { addresses, timeoutMs }) {
+    return new Promise((resolveOnce, rejectOnce) => {
+      let settled = false;
+      const ok = (value) => {
+        if (settled) return;
+        settled = true;
+        resolveOnce(value);
+      };
+      const bad = (error) => {
+        if (settled) return;
+        settled = true;
+        rejectOnce(error);
+      };
+      const send = url.protocol === 'https:' ? httpsRequest : httpRequest;
+      const req = send(
+        url,
+        {
+          lookup: pinnedLookup(addresses),
+          headers: { accept: 'image/*', 'user-agent': 'dsh-butler/0.1' },
+          timeout: timeoutMs,
+        },
+        (res) => {
+          const status = res.statusCode || 0;
+          if (status >= 300 && status < 400) {
+            res.resume();
+            ok({ status, location: res.headers?.location });
+            return;
+          }
+          if (status < 200 || status >= 300) {
+            res.resume();
+            bad(new Error(`下载图片失败（HTTP ${status}）`));
+            return;
+          }
+          const declared = Number(res.headers?.['content-length']);
+          if (Number.isFinite(declared) && declared > limit) {
+            res.destroy();
+            bad(new Error(sizeError(declared)));
+            return;
+          }
+          const chunks = [];
+          let total = 0;
+          res.on('data', (chunk) => {
+            total += chunk.length;
+            if (total > limit) {
+              res.destroy();
+              bad(new Error(`图片太大了（超过上限 ${limit / 1024 / 1024}MB），已中止`));
+              return;
+            }
+            chunks.push(chunk);
+          });
+          res.on('end', () => ok({ status, buffer: Buffer.concat(chunks) }));
+          res.on('error', (error) => bad(error));
+        },
+      );
+      req.on('timeout', () => req.destroy(new Error(`下载图片超时（超过 ${Math.round(timeoutMs / 1000)} 秒）`)));
+      req.on('error', (error) => bad(error));
+      req.end();
+    });
   }
 
   /** 读响应体并守住体积上限：不能先 text() 再判大小。 */
