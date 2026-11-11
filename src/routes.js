@@ -15,8 +15,8 @@
 import { verifyPhotoSignature } from './photos.js';
 
 const MAX_BODY = 256 * 1024;
-// 照片走 base64，8MB 的图编码后约 10.7MB；其它接口仍用 256KB，别为一张图放宽全部入口。
-const MAX_PHOTO_BODY = 12 * 1024 * 1024;
+// 照片走 base64，单张上限 50MB，编码后约 66.7MB；留些余量。其它接口仍用 256KB，别为一张图放宽全部入口。
+const MAX_PHOTO_BODY = 72 * 1024 * 1024;
 
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]', '::1', '0:0:0:0:0:0:0:1']);
 

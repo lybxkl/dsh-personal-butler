@@ -171,10 +171,12 @@ test('照片：只认真正的图片字节，dataURL 与大小都有边界', () 
   assert.equal(sniffImageMime(Buffer.alloc(20)), '');
 });
 
-test('照片：超过 8MB 被拒绝', () => {
-  const { photos } = makeService();
-  const big = Buffer.concat([PNG_BUFFER, Buffer.alloc(MAX_PHOTO_BYTES)]);
-  assert.throws(() => photos.saveBuffer({ data: big, mime: 'image/png' }), /图片太大了/);
+test('照片：单张超过上限被拒绝（默认 50MB；测试注入小上限，不写大文件）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'butler-size-'));
+  const store = new Store({ filePath: join(dir, 'butler.json') }).load();
+  const photos = createPhotos({ dir, store, maxBytes: 2 * 1024 * 1024 });
+  const big = Buffer.concat([PNG_BUFFER, Buffer.alloc(3 * 1024 * 1024)]);
+  assert.throws(() => photos.saveBuffer({ data: big, mime: 'image/png' }), /图片太大了（[\d.]+KB，上限 2MB）/);
 });
 
 test('收纳：删照片只允许删没挂上的，挂着的会被拒绝', async () => {
@@ -396,8 +398,10 @@ test('照片：路径不存在、不是图片、超大文件都要明确失败',
   assert.throws(() => photos.saveFile(text), /不是能识别的图片/);
 
   const huge = join(dir, 'huge.png');
-  writeFileSync(huge, Buffer.alloc(MAX_PHOTO_BYTES + 1, 1));
-  assert.throws(() => photos.saveFile(huge), /太大/);
+  writeFileSync(huge, Buffer.alloc(2 * 1024 * 1024 + 1, 1));
+  // 注入 1MB 上限，避免测试真的写一个 50MB 文件
+  const narrow = createPhotos({ dir, store: new Store({ filePath: join(dir, 'size.json') }).load(), maxBytes: 1024 * 1024 });
+  assert.throws(() => narrow.saveFile(huge), /太大/);
 });
 
 test('照片：远程图片链接会先下载再按字节校验，并按链接去重', async () => {

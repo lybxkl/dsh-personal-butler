@@ -66,10 +66,11 @@ function hostIsPrivate(hostname) {
   return false;
 }
 
-export const MAX_PHOTO_BYTES = 8 * 1024 * 1024;
+export const MAX_PHOTO_BYTES = 50 * 1024 * 1024;
 /** 整个 photos 表的上限：防止本机任意进程反复投图把磁盘写满。 */
 export const MAX_TOTAL_PHOTOS = 300;
-export const MAX_TOTAL_BYTES = 300 * 1024 * 1024;
+// 单张放宽到 50MB 之后，300MB 只够存几张：总量跟着放到 1GB，仍然挡住「无限灌图」
+export const MAX_TOTAL_BYTES = 1024 * 1024 * 1024;
 
 const MIME_EXT = {
   'image/jpeg': '.jpg',
@@ -121,7 +122,10 @@ export function verifyPhotoSignature(id, query, secret) {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-export function createPhotos({ dir, store, logger, secret = '', fetchImpl = null, fileRoots = null }) {
+export function createPhotos({ dir, store, logger, secret = '', fetchImpl = null, fileRoots = null, maxBytes = MAX_PHOTO_BYTES }) {
+  // 单张上限可注入：测试用一个小值就能覆盖「超限」分支，不必真的写 50MB 文件
+  const limit = Number.isFinite(maxBytes) && maxBytes > 0 ? maxBytes : MAX_PHOTO_BYTES;
+  const sizeError = (bytes) => `图片太大了（${Math.round(bytes / 1024)}KB，上限 ${Math.round(limit / 1024 / 1024 * 10) / 10}MB）`;
   const root = join(dir, 'photos');
   try {
     // 和账本一致：只有当前用户能进/能读
@@ -161,9 +165,7 @@ export function createPhotos({ dir, store, logger, secret = '', fetchImpl = null
     }
     const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data || []);
     if (!buffer.length) throw new Error('图片是空的');
-    if (buffer.length > MAX_PHOTO_BYTES) {
-      throw new Error(`图片太大了（${Math.round(buffer.length / 1024)}KB，上限 ${MAX_PHOTO_BYTES / 1024 / 1024}MB）`);
-    }
+    if (buffer.length > limit) throw new Error(sizeError(buffer.length));
     // 只认字节能嗅探出来的真图片：附件/前端声明的 mediaType 都不可信
     const sniffed = sniffImageMime(buffer);
     if (!sniffed) throw new Error('这不是能识别的图片（只支持 jpg / png / gif / webp）');
@@ -236,9 +238,7 @@ export function createPhotos({ dir, store, logger, secret = '', fetchImpl = null
       throw new Error('读不到这张图（文件不存在或没有权限）');
     }
     if (!stat.isFile()) throw new Error('这不是一个图片文件');
-    if (stat.size > MAX_PHOTO_BYTES) {
-      throw new Error(`图片太大了（${Math.round(stat.size / 1024)}KB，上限 ${MAX_PHOTO_BYTES / 1024 / 1024}MB）`);
-    }
+    if (stat.size > limit) throw new Error(sizeError(stat.size));
     const buffer = readFileSync(abs);
     return saveBuffer({ data: buffer, itemId, refId: shortKey('file:', abs) });
   }
@@ -247,7 +247,7 @@ export function createPhotos({ dir, store, logger, secret = '', fetchImpl = null
    * 从远程地址保存（QQ 机器人有时把图片给成 https://multimedia.nt.qq.com.cn/download?... 这种链接）。
    * 只接受 http/https，超时 + 体积上限，重定向逐跳校验协议；拿到的字节仍然要过 magic bytes 嗅探。
    */
-  async function saveUrl(rawUrl, { itemId = null, timeoutMs = 15000 } = {}) {
+  async function saveUrl(rawUrl, { itemId = null, timeoutMs = 5 * 60 * 1000 } = {}) {
     const doFetch = fetchImpl || globalThis.fetch;
     if (typeof doFetch !== 'function') throw new Error('当前宿主没有可用的网络请求能力，读不了这个图片链接');
     let current;
@@ -279,10 +279,8 @@ export function createPhotos({ dir, store, logger, secret = '', fetchImpl = null
       }
       if (!response.ok) throw new Error(`下载图片失败（HTTP ${response.status}）`);
       const declared = Number(response.headers?.get?.('content-length'));
-      if (Number.isFinite(declared) && declared > MAX_PHOTO_BYTES) {
-        throw new Error(`图片太大了（${Math.round(declared / 1024)}KB，上限 ${MAX_PHOTO_BYTES / 1024 / 1024}MB）`);
-      }
-      const buffer = await readBodyLimited(response, MAX_PHOTO_BYTES);
+      if (Number.isFinite(declared) && declared > limit) throw new Error(sizeError(declared));
+      const buffer = await readBodyLimited(response, limit);
       return saveBuffer({ data: buffer, itemId, refId: key });
     }
     throw new Error('图片链接跳转太多次了（最多 3 跳）');
