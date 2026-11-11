@@ -67,10 +67,27 @@ export function registerTools(ctx, service, helpers) {
     })();
     const ids = [];
     const skipped = [];
-    // 同一张图已经在别的物件上也没关系：service.attachPhotos 会复制一份给这件东西
+    const skippedOld = [];
+    /**
+     * 已经存在、且挂在别的物件上的图，多半是「往回看几条消息」翻出来的旧图（用户这条只发了文字）。
+     * 这种情况不要自动复制一份挂过来，否则每记一件纯文字物品就多一张无关照片。
+     * 用户显式指定 attachmentId 时例外：那是明确要求把这张也挂上。
+     */
+    const ownerNameOf = (itemId) => {
+      if (!itemId) return '';
+      const found = service.query('items', { id: itemId });
+      return found?.ok ? (found.data.items[0]?.name || '') : '';
+    };
+    const alreadyStored = (record) => {
+      if (wanted || !record?.itemId || record.itemId === ownerId) return false;
+      const name = ownerNameOf(record.itemId);
+      skippedOld.push(`这张图之前已经收在「${name || record.itemId}」里了，这次没有重复挂`);
+      return true;
+    };
     for (const ref of picked) {
       try {
         const record = await photos.saveFromRef(ref, { attachments });
+        if (alreadyStored(record)) continue;
         ids.push(record.id);
       } catch (error) {
         // 一张 HEIC/超大图不该让整批都挂不上：逐张兜住，把原因带回话里
@@ -82,7 +99,9 @@ export function registerTools(ctx, service, helpers) {
     if (!wanted) {
       for (const path of paths.slice(-12)) {
         try {
-          ids.push(photos.saveFile(path).id);
+          const record = photos.saveFile(path);
+          if (alreadyStored(record)) continue;
+          ids.push(record.id);
         } catch (error) {
           // 路径可能已被清理，或只是正文里引用了非图片文件：跳过，别让整条记录失败
           skipped.push(`${path}（${error?.message || error}）`);
@@ -90,17 +109,23 @@ export function registerTools(ctx, service, helpers) {
       }
       for (const url of urls.slice(-12)) {
         try {
-          ids.push((await photos.saveUrl(url)).id);
+          const record = await photos.saveUrl(url);
+          if (alreadyStored(record)) continue;
+          ids.push(record.id);
         } catch (error) {
           skipped.push(`${url}（${error?.message || error}）`);
         }
       }
     }
     if (!ids.length) {
+      // 翻到的旧图都已经收在别的记录里：不是失败，只是这次没有新图要存
+      if (!skipped.length && skippedOld.length) {
+        return { ids: [], totalInMessage: refs.length + paths.length + urls.length, skipped: [], skippedOld };
+      }
       const detail = skipped.length ? `（${skipped.join('；')}）` : '';
       throw new Error(`本次对话里没有找到可用的图片${detail}：先把照片/截图发进来，我才能一起存下`);
     }
-    return { ids, totalInMessage: refs.length + paths.length + urls.length, skipped };
+    return { ids, totalInMessage: refs.length + paths.length + urls.length, skipped, skippedOld };
   }
 
   function register(definition) {
@@ -616,7 +641,9 @@ export function registerTools(ctx, service, helpers) {
       + '用户发了图片时会自动把图一起存下来：Web/桌面是消息附件，QQ/微信是消息里的图片路径；这条消息里有多张就全部存（最多 12 张），'
       + '先发图、隔一两句再落库也能找到（往回看最近几条用户消息，只取最近一条带图的消息），同一张图不会重复存。'
       + '同一个东西换位置时带 id 更新，不要新建；想指定某一张图才传 attachmentId，不要存图时传 keepPhoto=false。'
-      + '要改/删已有的照片：把想保留的照片 id 放进 photoIds（可从 butler_item_find 的返回里取），空数组表示全部摘掉。',
+      + '要加照片：把新图 id 放进 photoIds（追加，不会覆盖原有照片）；要摘掉某张：放 removePhotoIds；'
+      + '整组换掉才用 replacePhotos:true。注意 photoIds 传 [] 什么都不做（不是「删光」），'
+      + '用户说「把那张图删了」时一定要用 removePhotoIds，别只传剩下的 id。',
     parameters: {
       id: { type: 'string', description: '要更新的物品 id；新增留空' },
       name: { type: 'string', required: true, description: '物品名称，如 充电器、备用钥匙、圣诞装饰' },
@@ -653,14 +680,20 @@ export function registerTools(ctx, service, helpers) {
         if (hasImage || wanted) {
           try {
             const kept = await keepUserPhoto(args, exec, record.id);
+            if (!kept.ids.length) {
+              // 只翻到「之前已经收在别的记录里」的旧图：不是失败，也别再复制一份
+              photoNote = `\n${(kept.skippedOld && kept.skippedOld[0]) || '这条消息里没有新图要存'}`;
+            } else {
             const attached = await service.attachPhotos(record.id, kept.ids);
             if (attached.ok) {
               record = attached.data.record;
               const stored = attached.data.attached ?? kept.ids.length;
               const dupes = attached.data.skipped ?? 0;
               const failed = Array.isArray(kept.skipped) ? kept.skipped : [];
-              const notes = [`照片已一起存好（存了 ${stored} 张，这件东西现在共 ${record.photoCount} 张）`];
-              if (dupes) notes.push(`另有 ${dupes} 张本来就挂在这件东西上，没有重复存`);
+              const notes = [];
+              if (stored) notes.push(`照片已一起存好（存了 ${stored} 张，这件东西现在共 ${record.photoCount} 张）`);
+              else if (dupes) notes.push(`这张图本来就挂在这件东西上（共 ${record.photoCount} 张），没有重复存`);
+              else notes.push(`这件东西现在共 ${record.photoCount} 张照片`);
               if (failed.length) {
                 // 把「哪张没存上、为什么」说清楚；链接去掉 query（里面是临时 rkey），路径只留文件名
                 const brief = failed.slice(0, 3).map((line) => String(line)
@@ -682,6 +715,7 @@ export function registerTools(ctx, service, helpers) {
               // 挂不上（比如已经满 12 张）：把这次新存、又没人引用的图删掉，别只占磁盘
               for (const id of kept.ids) await service.removePhoto(id).catch(() => {});
               photoNote = `\n（图片已经存进管家目录，但没挂到记录上：${attached.error}）`;
+            }
             }
           } catch (error) {
             // 图片没存上不该让整次调用变成「失败」：物品其实已经记好了，重试会产生重复记录

@@ -904,6 +904,8 @@ export function createService({ store, config, kinds, credentials, quota, remind
   function claimPhotoIds(rawIds, ownerId, copiedOut) {
     if (rawIds === undefined || rawIds === null) return rawIds;
     const list = Array.isArray(rawIds) ? rawIds : [rawIds];
+    // 复制可能命中「之前给同一物件复制过」的副本，那种不是这次新建的，失败回滚时不能删
+    const known = new Set(store.list('photos').map((one) => one.id));
     const claimed = new Map();
     return list.map((raw) => {
       const id = typeof raw === 'string' ? raw : raw && typeof raw === 'object' ? raw.id : '';
@@ -920,7 +922,8 @@ export function createService({ store, config, kinds, credentials, quota, remind
       // 复制失败（原图读不到 / 照片总量到上限）要把真实原因带出去，不能伪装成「已被占用」
       const copied = photosModule.copy(photo, { itemId: ownerId });
       if (!copied || !copied.id) throw new Error(`照片 ${id} 复制失败（详情看宿主日志）`);
-      copiedOut?.push(copied.id);
+      // 只有这次真正新建的副本才登记进回滚清单；复用已有副本不能删
+      if (!known.has(copied.id)) copiedOut?.push(copied.id);
       claimed.set(id, copied.id);
       return copied.id;
     });
@@ -1023,16 +1026,16 @@ export function createService({ store, config, kinds, credentials, quota, remind
       if (index >= 0) nextIds.splice(index, 1);
       if (currentIds.includes(id) && !removedIds.includes(id)) removedIds.push(id);
     }
-    if (nextIds.length > 12) {
-      return fail(`一件东西最多挂 12 张照片，这次会变成 ${nextIds.length} 张：先移除几张旧的再挂新的`);
-    }
-
     const copies = [];
     let resolved;
     // 过期的照片 id（比如模型从旧的 butler_item_find 回话里抄来的）不该让整条收纳写入失败：
     // 照片是辅助信息，不认识的就丢掉并告诉模型，物品本身照常记。
+    // 必须先过滤再判上限：否则 12 个 id 里混一个失效的，就会被误判成第 13 张。
     const unknown = nextIds.filter((id) => !store.find('photos', id));
     nextIds = nextIds.filter((id) => store.find('photos', id));
+    if (nextIds.length > 12) {
+      return fail(`一件东西最多挂 12 张照片，这次会变成 ${nextIds.length} 张：先移除几张旧的再挂新的`);
+    }
     try {
       resolved = resolvePhotoIds(claimPhotoIds(nextIds, ownerId, copies), ownerId);
     } catch (error) {
@@ -1105,7 +1108,12 @@ export function createService({ store, config, kinds, credentials, quota, remind
     }
     const saved = store.patch('items', itemId, { photoIds: merged });
     hooks?.onDataChanged?.('items');
-    return done({ record: itemView(saved), attached: added.length, skipped: resolved.ids.length - added.length });
+    return done({
+      record: itemView(saved),
+      attached: added.length,
+      // 本来就已经挂在这件东西上的张数（前端/模型重复带同一张图时会 > 0）
+      skipped: incoming.ids.length - unique.length,
+    });
   }
 
   async function removeItem(id) {

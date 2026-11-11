@@ -3546,9 +3546,7 @@
                 var originals = initialPhotos().map(function (photo) {
                   return photo.id;
                 });
-                var removedOnSave = initialPhotos().filter(function (photo) {
-                  return keep.indexOf(photo.id) < 0;
-                });
+                // 摘掉的图由后端在保存时连文件一起删，前端不再重复请求（否则每次删图都会假报「照片不存在」）
                 var addedUnused = photos.filter(function (photo) {
                   return originals.indexOf(photo.id) < 0;
                 });
@@ -3568,6 +3566,11 @@
                       });
                     },
                     onRemove: function (photo) {
+                      // 这张是这次新传、还没保存的：直接从磁盘删掉，别留下没人引用的孤儿
+                      var isNew = initialPhotos().every(function (one) {
+                        return one.id !== photo.id;
+                      });
+                      if (isNew) props.onDropPhoto(photo);
                       setLocalPhotos(
                         currentPhotos().filter(function (one) {
                           return one.id !== photo.id;
@@ -3581,8 +3584,6 @@
                   onSubmit: function () {
                     props.onSave(Object.assign({ id: item.id }, current, { photoIds: keep, replacePhotos: true }), function (ok) {
                       if (!ok) return;
-                      // 保存成功后再删被摘掉的图片文件；删不掉也不影响记录（后端会拒绝删还挂着的图）
-                      removedOnSave.forEach(props.onDropPhoto);
                       closeEdit();
                     });
                   },

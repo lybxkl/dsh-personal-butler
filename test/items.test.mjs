@@ -485,10 +485,31 @@ test('照片链接：本机与内网地址直接拒绝，不给探测机会', as
     'http://192.168.1.2/a.png',
     'http://10.0.0.5/a.png',
     'http://0x7f000001/a.png',
+    // IPv4 映射到 IPv6、结尾带点的 localhost：只看字符串会漏判
+    'http://[::ffff:127.0.0.1]/a.png',
+    'http://[::ffff:192.168.1.5]/a.png',
+    'http://localhost./a.png',
   ]) {
     await assert.rejects(() => photos.saveUrl(url), /本机或内网/);
   }
   assert.equal(hits, 0);
+});
+
+test('照片链接：302 跳到内网地址也会被拦下（逐跳校验，不是只看第一跳）', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'butler-ssrf-hop-'));
+  const store = new Store({ filePath: join(dir, 'butler.json') }).load();
+  let hits = 0;
+  const photos = createPhotos({
+    dir,
+    store,
+    fetchImpl: async () => {
+      hits += 1;
+      return new Response('', { status: 302, headers: { location: 'http://169.254.169.254/latest/meta-data/x.png' } });
+    },
+  });
+  await assert.rejects(() => photos.saveUrl('https://public.example.com/a.png'), /本机或内网/);
+  // 第二跳根本没发出去
+  assert.equal(hits, 1);
 });
 
 test('照片去重：超长 QQ 链接按哈希存 refId，重复保存不再下载也不再占磁盘', async () => {

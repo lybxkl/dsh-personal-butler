@@ -14,7 +14,9 @@
  */
 
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { lookup } from 'node:dns/promises';
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { isIP } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 
@@ -42,28 +44,83 @@ function refIdOf(ref) {
   return shortKey('attach:', stableStringify(ref ?? {}));
 }
 
+/** 主机名归一化：去掉 IPv6 的方括号与大小写差异，结尾的点也去掉（`localhost.` 也是本机）。 */
+function normalizeHost(hostname) {
+  return String(hostname || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+    .replace(/\.+$/, '');
+}
+
+/** IPv4 字面量是不是本机 / 内网 / 保留地址；格式不对也按「不安全」处理。 */
+function privateV4(host) {
+  const parts = String(host).split('.');
+  if (parts.length !== 4 || parts.some((x) => !/^\d{1,3}$/.test(x))) return true;
+  const nums = parts.map(Number);
+  if (nums.some((x) => x > 255)) return true;
+  const [a, b] = nums;
+  if (a === 0 || a === 10 || a === 127) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  if (a >= 224) return true;
+  return false;
+}
+
+/** `::ffff:7f00:1`（IPv4 映射）要还原成 IPv4 再判，否则会被当成普通 IPv6 放行。 */
+function mappedV4(host) {
+  if (!host.includes(':')) return null;
+  const index = host.lastIndexOf('ffff');
+  if (index < 0) return null;
+  const rest = host.slice(index + 4).replace(/^:+/, '');
+  if (!rest) return null;
+  if (isIP(rest) === 4) return rest;
+  const groups = rest.split(':').filter(Boolean);
+  if (groups.length !== 2) return null;
+  const hi = parseInt(groups[0], 16);
+  const lo = parseInt(groups[1], 16);
+  if (!Number.isFinite(hi) || !Number.isFinite(lo)) return null;
+  return [hi >> 8, hi & 255, lo >> 8, lo & 255].join('.');
+}
+
 /** 主机是不是本机 / 内网：图片链接来自聊天正文，不能让它变成打内网的跳板。 */
 function hostIsPrivate(hostname) {
-  const host = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  const host = normalizeHost(hostname);
   if (!host) return true;
+  const mapped = mappedV4(host);
+  if (mapped) return privateV4(mapped);
   if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) return true;
-  if (!host.includes(':')) {
-    const parts = host.split('.');
-    if (parts.length !== 4 || parts.some((x) => !/^\d{1,3}$/.test(x))) return !host.includes('.'); // 单标签主机名也拒
-    const nums = parts.map(Number);
-    if (nums.some((x) => x > 255)) return true;
-    const [a, b] = nums;
-    if (a === 0 || a === 10 || a === 127) return true;
-    if (a === 169 && b === 254) return true;
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    if (a === 192 && b === 168) return true;
-    if (a === 100 && b >= 64 && b <= 127) return true;
-    if (a >= 224) return true;
+  if (isIP(host) === 4) return privateV4(host);
+  if (isIP(host) === 6) {
+    if (host === '::1' || host === '::') return true;
+    if (host.startsWith('fc') || host.startsWith('fd') || host.startsWith('fe80')) return true;
     return false;
   }
-  if (host === '::1' || host === '::') return true;
-  if (host.startsWith('fc') || host.startsWith('fd') || host.startsWith('fe80')) return true;
-  return false;
+  // 域名：单标签主机名（没有点）一律当内网；真正的公网域名交给 DNS 结果再判一次
+  return !host.includes('.');
+}
+
+/**
+ * 真正发请求前逐个主机校验：字面量直接判，域名先解析再判（解析失败就交给 fetch 报错）。
+ * 光看字符串挡不住「域名解析到 127.0.0.1 / 169.254.169.254」这类写法。
+ */
+async function assertPublicHost(hostname) {
+  const host = normalizeHost(hostname);
+  if (hostIsPrivate(host)) throw new Error('图片链接指向本机或内网地址，已拒绝');
+  if (isIP(host)) return;
+  let addresses;
+  try {
+    addresses = await dns.lookup(host, { all: true });
+  } catch {
+    return;
+  }
+  for (const one of addresses) {
+    if (hostIsPrivate(one.address)) {
+      throw new Error(`图片链接的域名解析到了内网地址（${one.address}），已拒绝`);
+    }
+  }
 }
 
 export const MAX_PHOTO_BYTES = 50 * 1024 * 1024;
@@ -245,7 +302,7 @@ export function createPhotos({ dir, store, logger, secret = '', fetchImpl = null
 
   /**
    * 从远程地址保存（QQ 机器人有时把图片给成 https://multimedia.nt.qq.com.cn/download?... 这种链接）。
-   * 只接受 http/https，超时 + 体积上限，重定向逐跳校验协议；拿到的字节仍然要过 magic bytes 嗅探。
+   * 只接受 http/https，超时 + 体积上限，重定向**逐跳**校验协议与主机；拿到的字节仍然要过 magic bytes 嗅探。
    */
   async function saveUrl(rawUrl, { itemId = null, timeoutMs = 5 * 60 * 1000 } = {}) {
     const doFetch = fetchImpl || globalThis.fetch;
@@ -257,12 +314,13 @@ export function createPhotos({ dir, store, logger, secret = '', fetchImpl = null
       throw new Error('图片链接格式不对');
     }
     if (current.protocol !== 'http:' && current.protocol !== 'https:') throw new Error('图片链接只支持 http/https');
-    if (hostIsPrivate(current.hostname)) throw new Error('这个链接指向本机或内网地址，出于安全考虑不下载');
     // 先查重再下载：同一条链接被重复处理时不必再发一次请求。身份用最终判断前的 URL，跳转不会改变它
     const key = shortKey('url:', current.href);
     const seen = store.list('photos').find((photo) => photo.refId === key);
     if (seen) return seen;
     for (let hop = 0; hop <= 3; hop += 1) {
+      // 每一跳都要重新校验：否则一个公网地址 302 到 127.0.0.1 / 169.254.169.254 就能把管家当跳板
+      await assertPublicHost(current.hostname);
       const response = await doFetch(current.href, {
         redirect: 'manual',
         signal: AbortSignal.timeout(timeoutMs),
