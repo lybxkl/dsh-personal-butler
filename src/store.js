@@ -310,6 +310,8 @@ export function normalizePhoto(raw) {
     mime: safeText(raw.mime || 'image/jpeg', 40),
     byteSize: nullableNumber(raw.byteSize),
     itemId: raw.itemId ? String(raw.itemId) : null,
+    // 这张图来自哪个附件 / 哪个本地文件：同一张图重复保存时按它去重，不会越存越多
+    refId: safeText(raw.refId, 200) || null,
     createdAt: toIso(raw.createdAt) || nowIso(),
   };
 }

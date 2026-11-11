@@ -348,3 +348,88 @@ test('收纳：photoIds 传成整个照片对象也能认（模型常整段回�
   assert.equal(updated.data.record.photoCount, 1);
   assert.equal(updated.data.record.photos[0].id, photo.id);
 });
+
+test('照片：QQ 机器人给的本地图片路径也能存下来，并按同一路径去重', () => {
+  const { dir, photos, store } = makeService();
+  const file = join(dir, 'qq-upload.png');
+  writeFileSync(file, PNG_BUFFER);
+
+  const first = photos.saveFile(file);
+  assert.equal(first.refId, `file:${file}`);
+  assert.equal(first.mime, 'image/png');
+  assert.equal(existsSync(join(photos.root, first.file)), true);
+
+  // 用户重说一遍、模型重复调用：同一张图只留一份，不重复占磁盘
+  const second = photos.saveFile(file);
+  assert.equal(second.id, first.id);
+  assert.equal(store.list('photos').length, 1);
+
+  // 不同路径但内容相同的图仍算两张（路径才是身份，别把用户两张相似的图合并）
+  const other = join(dir, 'qq-upload-2.png');
+  writeFileSync(other, PNG_BUFFER);
+  assert.notEqual(photos.saveFile(other).id, first.id);
+  assert.equal(store.list('photos').length, 2);
+});
+
+test('照片：路径不存在、不是图片、超大文件都要明确失败', () => {
+  const { dir, photos } = makeService();
+  assert.throws(() => photos.saveFile(join(dir, 'nope.jpg')), /文件不存在/);
+
+  const text = join(dir, 'note.jpg');
+  writeFileSync(text, 'not an image at all');
+  assert.throws(() => photos.saveFile(text), /不是能识别的图片/);
+
+  const huge = join(dir, 'huge.png');
+  writeFileSync(huge, Buffer.alloc(MAX_PHOTO_BYTES + 1, 1));
+  assert.throws(() => photos.saveFile(huge), /太大/);
+});
+
+test('照片：远程图片链接会先下载再按字节校验，并按链接去重', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'butler-url-'));
+  const store = new Store({ filePath: join(dir, 'butler.json') }).load();
+  let hits = 0;
+  const photos = createPhotos({
+    dir,
+    store,
+    fetchImpl: async () => {
+      hits += 1;
+      return new Response(PNG_BUFFER, { status: 200, headers: { 'content-type': 'image/webp', 'content-length': String(PNG_BUFFER.length) } });
+    },
+  });
+  const url = 'https://multimedia.nt.qq.com.cn/download?appid=1406&fileid=abc&spec=0';
+  const first = await photos.saveUrl(url);
+  assert.equal(first.mime, 'image/png'); // 声明是 webp，实际按字节认成 png
+  assert.equal(first.byteSize, PNG_BUFFER.length);
+  assert.equal(first.refId, `url:${url}`);
+  const again = await photos.saveUrl(url);
+  assert.equal(again.id, first.id);
+  assert.equal(hits, 1); // 重复保存不再下载第二遍
+});
+
+test('照片：远程链接的异常都明确失败（协议 / 状态码 / 非图片 / 超大 / 跳转）', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'butler-url-bad-'));
+  const store = new Store({ filePath: join(dir, 'butler.json') }).load();
+  const make = (impl) => createPhotos({ dir, store, fetchImpl: impl });
+
+  await assert.rejects(() => make(async () => new Response('')).saveUrl('file:///etc/passwd'), /http\/https/);
+
+  await assert.rejects(
+    () => make(async () => new Response('nope', { status: 404 })).saveUrl('https://x.test/a.jpg'),
+    /HTTP 404/,
+  );
+
+  await assert.rejects(
+    () => make(async () => new Response('not an image')).saveUrl('https://x.test/b.jpg'),
+    /不是能识别的图片/,
+  );
+
+  await assert.rejects(
+    () => make(async () => new Response(PNG_BUFFER, { headers: { 'content-length': String(MAX_PHOTO_BYTES + 1) } })).saveUrl('https://x.test/c.png'),
+    /太大/,
+  );
+
+  await assert.rejects(
+    () => make(async () => new Response('', { status: 302, headers: { location: 'ftp://x.test/a.jpg' } })).saveUrl('https://x.test/d.jpg'),
+    /不支持的协议/,
+  );
+});

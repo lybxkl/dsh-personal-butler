@@ -14,10 +14,17 @@
  */
 
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
 import { newId, nowIso, safeText } from './util.js';
+
+/** 附件引用的稳定身份：同一张图被重复保存时按它去重。 */
+function refIdOf(ref) {
+  const id = String(ref?.attachmentId ?? ref?.id ?? ref?.sha256 ?? '').trim();
+  if (id) return `attach:${id}`;
+  return `attach:${JSON.stringify(ref ?? {}).slice(0, 160)}`;
+}
 
 export const MAX_PHOTO_BYTES = 8 * 1024 * 1024;
 /** 整个 photos 表的上限：防止本机任意进程反复投图把磁盘写满。 */
@@ -74,7 +81,7 @@ export function verifyPhotoSignature(id, query, secret) {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-export function createPhotos({ dir, store, logger, secret = '' }) {
+export function createPhotos({ dir, store, logger, secret = '', fetchImpl = null }) {
   const root = join(dir, 'photos');
   try {
     // 和账本一致：只有当前用户能进/能读
@@ -100,7 +107,15 @@ export function createPhotos({ dir, store, logger, secret = '' }) {
   }
 
   /** 落盘并登记；返回 photos 记录。 */
-  function saveBuffer({ data, mime, itemId = null }) {
+  /**
+   * 落盘并登记；返回 photos 记录。
+   * 带 refId 时先去重：同一张图被保存多次（用户重说一遍、模型重复调用）只留一份。
+   */
+  function saveBuffer({ data, mime, itemId = null, refId = null }) {
+    if (refId) {
+      const seen = store.list('photos').find((photo) => photo.refId === refId);
+      if (seen) return seen;
+    }
     const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data || []);
     if (!buffer.length) throw new Error('图片是空的');
     if (buffer.length > MAX_PHOTO_BYTES) {
@@ -122,7 +137,7 @@ export function createPhotos({ dir, store, logger, secret = '' }) {
     const file = `${id}${MIME_EXT[sniffed]}`;
     const abs = join(rootAbs, file);
     writeFileSync(abs, buffer, { mode: 0o600 });
-    const record = store.put('photos', { id, file, mime: sniffed, byteSize: buffer.length, itemId, createdAt: nowIso() });
+    const record = store.put('photos', { id, file, mime: sniffed, byteSize: buffer.length, itemId, refId, createdAt: nowIso() });
     // put 之后如果落盘失败，记录会留在内存里却读不到字节 —— 这里回溯删掉，别留烂账
     const saved = typeof store.save === 'function' ? store.save() : true;
     if (saved === false) {
@@ -143,7 +158,96 @@ export function createPhotos({ dir, store, logger, secret = '' }) {
     const stored = await attachments.readImage(ref);
     const buffer = stored?.data;
     const mime = String(stored?.ref?.mediaType || ref?.mediaType || '');
-    return saveBuffer({ data: buffer, mime, itemId });
+    return saveBuffer({ data: buffer, mime, itemId, refId: refIdOf(ref) });
+  }
+
+  /**
+   * 从本地文件保存（QQ 机器人就是这种：消息里给的是 `.dsh-qqbot/media/xxx.jpg` 路径）。
+   * 只读这一个文件，超限直接拒绝，不把整个目录扫一遍。
+   */
+  function saveFile(filePath, { itemId = null } = {}) {
+    const abs = resolve(String(filePath || ''));
+    let stat;
+    try {
+      stat = statSync(abs);
+    } catch {
+      throw new Error(`读不到这张图（文件不存在：${abs}）`);
+    }
+    if (!stat.isFile()) throw new Error('这不是一个图片文件');
+    if (stat.size > MAX_PHOTO_BYTES) {
+      throw new Error(`图片太大了（${Math.round(stat.size / 1024)}KB，上限 ${MAX_PHOTO_BYTES / 1024 / 1024}MB）`);
+    }
+    const buffer = readFileSync(abs);
+    return saveBuffer({ data: buffer, itemId, refId: `file:${abs}` });
+  }
+
+  /**
+   * 从远程地址保存（QQ 机器人有时把图片给成 https://multimedia.nt.qq.com.cn/download?... 这种链接）。
+   * 只接受 http/https，超时 + 体积上限，重定向逐跳校验协议；拿到的字节仍然要过 magic bytes 嗅探。
+   */
+  async function saveUrl(rawUrl, { itemId = null, timeoutMs = 15000 } = {}) {
+    const doFetch = fetchImpl || globalThis.fetch;
+    if (typeof doFetch !== 'function') throw new Error('当前宿主没有可用的网络请求能力，读不了这个图片链接');
+    let current;
+    try {
+      current = new URL(String(rawUrl || ''));
+    } catch {
+      throw new Error('图片链接格式不对');
+    }
+    if (current.protocol !== 'http:' && current.protocol !== 'https:') throw new Error('图片链接只支持 http/https');
+    // 先查重再下载：同一条链接被重复处理时不必再发一次请求
+    const seen = store.list('photos').find((photo) => photo.refId === `url:${current.href}`);
+    if (seen) return seen;
+    for (let hop = 0; hop <= 3; hop += 1) {
+      const response = await doFetch(current.href, {
+        redirect: 'manual',
+        signal: AbortSignal.timeout(timeoutMs),
+        headers: { accept: 'image/*' },
+      });
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers?.get?.('location');
+        if (!location) throw new Error(`图片链接跳转没有目标（HTTP ${response.status}）`);
+        const next = new URL(location, current);
+        if (next.protocol !== 'http:' && next.protocol !== 'https:') throw new Error('图片链接跳转到了不支持的协议');
+        current = next;
+        continue;
+      }
+      if (!response.ok) throw new Error(`下载图片失败（HTTP ${response.status}）`);
+      const declared = Number(response.headers?.get?.('content-length'));
+      if (Number.isFinite(declared) && declared > MAX_PHOTO_BYTES) {
+        throw new Error(`图片太大了（${Math.round(declared / 1024)}KB，上限 ${MAX_PHOTO_BYTES / 1024 / 1024}MB）`);
+      }
+      const buffer = await readBodyLimited(response, MAX_PHOTO_BYTES);
+      return saveBuffer({ data: buffer, itemId, refId: `url:${current.href}` });
+    }
+    throw new Error('图片链接跳转太多次了（最多 3 跳）');
+  }
+
+  /** 读响应体并守住体积上限：不能先 text() 再判大小。 */
+  async function readBodyLimited(response, limit) {
+    const reader = response.body?.getReader?.();
+    if (!reader) {
+      const buffer = Buffer.from(await response.arrayBuffer());
+      if (buffer.length > limit) throw new Error(`图片太大了（${Math.round(buffer.length / 1024)}KB，上限 ${limit / 1024 / 1024}MB）`);
+      return buffer;
+    }
+    const chunks = [];
+    let total = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.length;
+        if (total > limit) {
+          await reader.cancel().catch(() => {});
+          throw new Error(`图片太大了（超过上限 ${limit / 1024 / 1024}MB），已中止`);
+        }
+        chunks.push(Buffer.from(value));
+      }
+    } finally {
+      reader.releaseLock?.();
+    }
+    return Buffer.concat(chunks);
   }
 
   /** 面板上传走 data:image/...;base64,xxxx。 */
@@ -157,6 +261,12 @@ export function createPhotos({ dir, store, logger, secret = '' }) {
 
   function find(id) {
     return store.find('photos', id) || null;
+  }
+
+  /** 按来源身份查已存照片（附件 id / 本地路径 / 远程链接）。 */
+  function findByRef(refId) {
+    if (!refId) return null;
+    return store.list('photos').find((photo) => photo.refId === refId) || null;
   }
 
   /** 读取字节，供路由回给浏览器；任何异常都当成「没有这张图」。 */
@@ -263,7 +373,7 @@ export function createPhotos({ dir, store, logger, secret = '' }) {
     return { id: record.id, url: `${base}?${query}`, mime: record.mime, byteSize: record.byteSize };
   }
 
-  return { root, saveBuffer, saveFromRef, saveDataUrl, find, read, remove, countFor, reconcile, view, totalUsage };
+  return { root, saveBuffer, saveFromRef, saveFile, saveUrl, saveDataUrl, find, findByRef, read, remove, countFor, reconcile, view, totalUsage };
 }
 
 /** 面板用的图片元数据（不带签名；需要带签名时用 createPhotos(...).view）。 */

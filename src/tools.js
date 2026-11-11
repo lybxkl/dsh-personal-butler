@@ -6,7 +6,7 @@
  */
 
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { userImageRefs } from './image-refs.js';
+import { userImagePaths, userImageRefs, userImageUrls } from './image-refs.js';
 import { fmtLocal, humanDelta, jsonSafe } from './util.js';
 
 function text(value, fallback = '完成') {
@@ -39,10 +39,15 @@ export function registerTools(ctx, service, helpers) {
   const { logger, photos } = helpers;
   const disposers = [];
 
-  /** 把用户这一轮发的图都复制进管家数据目录；返回 photoId 数组（失败抛错，由调用方决定是否致命）。 */
-  async function keepUserPhoto(args, exec) {
+  /**
+   * 把用户这一轮发的图都复制进管家数据目录；返回 photoId 数组（失败抛错，由调用方决定是否致命）。
+   * 两条通道都认：Web/桌面是附件引用，QQ 机器人是正文里的本地文件路径。
+   */
+  async function keepUserPhoto(args, exec, ownerId = null) {
     if (!photos) throw new Error('当前宿主没有图片服务');
     const refs = userImageRefs(exec);
+    const paths = userImagePaths(exec);
+    const urls = userImageUrls(exec);
     const wanted = typeof args?.attachmentId === 'string' ? args.attachmentId.trim() : '';
     // 附件对象上可能叫 attachmentId，也可能只有 id —— 两种都认，免得模型指定了某张却永远匹配不上
     const idOf = (ref) => String(ref?.attachmentId ?? ref?.id ?? '');
@@ -55,16 +60,57 @@ export function registerTools(ctx, service, helpers) {
       // 一次发多张（柜子全貌 / 抽屉内部 / 标签特写）时全部存下来，不要只留最后一张
       picked = refs.slice(-12);
     }
-    if (!picked.length) throw new Error('本次对话里没有找到图片：先把照片/截图发进来，我才能一起存下');
+    if (wanted && !picked.length) throw new Error('本次对话里没有找到图片：先把照片/截图发进来，我才能一起存下');
     const attachments = (() => {
       try { return ctx.get('attachments'); } catch { return undefined; }
     })();
     const ids = [];
+    const skipped = [];
+    /** 已经挂在别的物件上的图不再重复挂（否则整条 attach 会被拒）。 */
+    const claimable = (refId) => {
+      const seen = typeof photos.findByRef === 'function' ? photos.findByRef(refId) : null;
+      return !seen || !seen.itemId || seen.itemId === ownerId;
+    };
     for (const ref of picked) {
+      const refId = `attach:${String(ref?.attachmentId ?? ref?.id ?? '').trim()}`;
+      if (!claimable(refId)) {
+        skipped.push('这张图已经挂在别的物件上了');
+        continue;
+      }
       const record = await photos.saveFromRef(ref, { attachments });
       ids.push(record.id);
     }
-    return { ids, totalInMessage: refs.length };
+    // QQ/微信通道：图片可能是本地文件路径，也可能是远程地址，按最多 12 张补上
+    if (!wanted) {
+      for (const path of paths.slice(-12)) {
+        if (!claimable(`file:${path}`)) {
+          skipped.push(`${path}（已经挂在别的物件上了）`);
+          continue;
+        }
+        try {
+          ids.push(photos.saveFile(path).id);
+        } catch (error) {
+          // 路径可能已被清理，或只是正文里引用了非图片文件：跳过，别让整条记录失败
+          skipped.push(`${path}（${error?.message || error}）`);
+        }
+      }
+      for (const url of urls.slice(-12)) {
+        if (!claimable(`url:${url}`)) {
+          skipped.push(`${url}（已经挂在别的物件上了）`);
+          continue;
+        }
+        try {
+          ids.push((await photos.saveUrl(url)).id);
+        } catch (error) {
+          skipped.push(`${url}（${error?.message || error}）`);
+        }
+      }
+    }
+    if (!ids.length) {
+      const detail = skipped.length ? `（${skipped.join('；')}）` : '';
+      throw new Error(`本次对话里没有找到可用的图片${detail}：先把照片/截图发进来，我才能一起存下`);
+    }
+    return { ids, totalInMessage: refs.length + paths.length + urls.length, skipped };
   }
 
   function register(definition) {
@@ -577,7 +623,8 @@ export function registerTools(ctx, service, helpers) {
       '记录「家里的东西放在哪了」（收纳）。用户发照片或文字说「这个放哪了」时用。'
       + '必须问清：是什么东西、放在哪（房间/柜子/抽屉都可以；location 与 detail 至少给一个）、多少件、什么时候放的；'
       + '用户发的是照片，就先从图里认出是什么东西、放在哪、有几件，再和他确认。'
-      + '用户这次消息里带了图片时会自动把图一起存下来（这条消息里有多张就全部存，最多 12 张；只认这次的消息，不会翻出旧截图）。'
+      + '用户发了图片时会自动把图一起存下来：Web/桌面是消息附件，QQ/微信是消息里的图片路径；这条消息里有多张就全部存（最多 12 张），'
+      + '先发图、隔一两句再落库也能找到（往回看最近几条用户消息，只取最近一条带图的消息），同一张图不会重复存。'
       + '同一个东西换位置时带 id 更新，不要新建；想指定某一张图才传 attachmentId，不要存图时传 keepPhoto=false。'
       + '要改/删已有的照片：把想保留的照片 id 放进 photoIds（可从 butler_item_find 的返回里取），空数组表示全部摘掉。',
     parameters: {
@@ -606,11 +653,14 @@ export function registerTools(ctx, service, helpers) {
       let photoNote = '';
       if (args.keepPhoto !== false) {
         const refs = userImageRefs(exec);
-        const hasImage = refs.length > 0;
+        // QQ 机器人把图存成本地路径或 https 链接，正文里只有一行 `- Image: ...`，也要算「这次带了图」
+        const paths = userImagePaths(exec);
+        const urls = userImageUrls(exec);
+        const hasImage = refs.length > 0 || paths.length > 0 || urls.length > 0;
         const wanted = typeof args.attachmentId === 'string' && args.attachmentId.trim();
         if (hasImage || wanted) {
           try {
-            const kept = await keepUserPhoto(args, exec);
+            const kept = await keepUserPhoto(args, exec, record.id);
             const attached = await service.attachPhotos(record.id, kept.ids);
             if (attached.ok) {
               record = attached.data.record;
