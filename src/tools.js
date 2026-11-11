@@ -679,6 +679,8 @@ export function registerTools(ctx, service, helpers) {
               }
               photoNote = `\n${notes.join('；')}`;
             } else {
+              // 挂不上（比如已经满 12 张）：把这次新存、又没人引用的图删掉，别只占磁盘
+              for (const id of kept.ids) await service.removePhoto(id).catch(() => {});
               photoNote = `\n（图片已经存进管家目录，但没挂到记录上：${attached.error}）`;
             }
           } catch (error) {
