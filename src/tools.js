@@ -6,7 +6,7 @@
  */
 
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { userImagePaths, userImageRefs, userImageUrls } from './image-refs.js';
+import { userImageMentioned, userImagePaths, userImageRefs, userImageUrls } from './image-refs.js';
 import { fmtLocal, humanDelta, jsonSafe } from './util.js';
 
 function text(value, fallback = '完成') {
@@ -47,7 +47,8 @@ export function registerTools(ctx, service, helpers) {
     if (!photos) throw new Error('当前宿主没有图片服务');
     const refs = userImageRefs(exec);
     const paths = userImagePaths(exec);
-    const urls = userImageUrls(exec);
+    // 一条消息里同时有本地路径和链接时，多半是同一张图：有路径就不再下载，避免存两份
+    const urls = paths.length ? [] : userImageUrls(exec);
     const wanted = typeof args?.attachmentId === 'string' ? args.attachmentId.trim() : '';
     // 附件对象上可能叫 attachmentId，也可能只有 id —— 两种都认，免得模型指定了某张却永远匹配不上
     const idOf = (ref) => String(ref?.attachmentId ?? ref?.id ?? '');
@@ -68,8 +69,14 @@ export function registerTools(ctx, service, helpers) {
     const skipped = [];
     // 同一张图已经在别的物件上也没关系：service.attachPhotos 会复制一份给这件东西
     for (const ref of picked) {
-      const record = await photos.saveFromRef(ref, { attachments });
-      ids.push(record.id);
+      try {
+        const record = await photos.saveFromRef(ref, { attachments });
+        ids.push(record.id);
+      } catch (error) {
+        // 一张 HEIC/超大图不该让整批都挂不上：逐张兜住，把原因带回话里
+        if (wanted) throw error;
+        skipped.push(`${idOf(ref) || '附件'}（${error?.message || error}）`);
+      }
     }
     // QQ/微信通道：图片可能是本地文件路径，也可能是远程地址，按最多 12 张补上
     if (!wanted) {
@@ -621,7 +628,9 @@ export function registerTools(ctx, service, helpers) {
       placedAt: { type: 'string', description: '什么时候放的，支持 2026-11-10、昨天、3 天前（不能是将来时间）' },
       note: { type: 'string', description: '备注：干嘛用的、和什么放一起、多久没用过' },
       tags: { type: 'string', description: '关键词，逗号或空格分隔，方便以后搜' },
-      photoIds: { type: 'array', description: '要保留的照片 id 列表；不传=不动已有照片，传 []=全部摘掉' },
+      photoIds: { type: 'array', description: '要加的照片 id 列表（更新时是追加，不会覆盖原有照片）' },
+      removePhotoIds: { type: 'array', description: '要从这件东西上移除的照片 id 列表（会连同文件一起删掉，除非还有别的记录引用）' },
+      replacePhotos: { type: 'boolean', description: '传 true 才用 photoIds 整体替换原有照片；一般不要用' },
       attachmentId: { type: 'string', description: '指定某一张图（一般不用传，默认把这条消息里的图都存下来）' },
       keepPhoto: { type: 'boolean', description: '传 false 表示这次不要存图，只记位置' },
       source: { type: 'string', description: '来源：screenshot | manual | model' },
@@ -638,7 +647,7 @@ export function registerTools(ctx, service, helpers) {
         const refs = userImageRefs(exec);
         // QQ 机器人把图存成本地路径或 https 链接，正文里只有一行 `- Image: ...`，也要算「这次带了图」
         const paths = userImagePaths(exec);
-        const urls = userImageUrls(exec);
+        const urls = paths.length ? [] : userImageUrls(exec);
         const hasImage = refs.length > 0 || paths.length > 0 || urls.length > 0;
         const wanted = typeof args.attachmentId === 'string' && args.attachmentId.trim();
         if (hasImage || wanted) {
@@ -648,10 +657,27 @@ export function registerTools(ctx, service, helpers) {
             if (attached.ok) {
               record = attached.data.record;
               const stored = attached.data.attached ?? kept.ids.length;
-              const skipped = attached.data.skipped ?? 0;
-              photoNote = `\n照片已一起存好（存了 ${stored} 张，这件东西现在共 ${record.photoCount} 张）`
-                + (skipped ? `；另有 ${skipped} 张本来就挂在这件东西上，没有重复存` : '')
-                + (kept.totalInMessage > kept.ids.length ? `。这条消息一共 ${kept.totalInMessage} 张，只存了最近 ${kept.ids.length} 张` : '');
+              const dupes = attached.data.skipped ?? 0;
+              const failed = Array.isArray(kept.skipped) ? kept.skipped : [];
+              const notes = [`照片已一起存好（存了 ${stored} 张，这件东西现在共 ${record.photoCount} 张）`];
+              if (dupes) notes.push(`另有 ${dupes} 张本来就挂在这件东西上，没有重复存`);
+              if (failed.length) {
+                // 把「哪张没存上、为什么」说清楚；链接去掉 query（里面是临时 rkey），路径只留文件名
+                const brief = failed.slice(0, 3).map((line) => String(line)
+                  .replace(/https?:\/\/[^\s）)]+/g, (url) => {
+                    try {
+                      const parsed = new URL(url);
+                      return `${parsed.origin}${parsed.pathname}…`;
+                    } catch {
+                      return '图片链接';
+                    }
+                  })
+                  .replace(/[A-Za-z]:[\\/][^\s）)]+/g, (path) => path.split(/[\\/]/).pop() || '本地图片'));
+                notes.push(`${failed.length} 张没存上：${brief.join('；')}`);
+              } else if (kept.totalInMessage > kept.ids.length) {
+                notes.push(`这条消息一共 ${kept.totalInMessage} 张，只存了最近 ${kept.ids.length} 张`);
+              }
+              photoNote = `\n${notes.join('；')}`;
             } else {
               photoNote = `\n（图片已经存进管家目录，但没挂到记录上：${attached.error}）`;
             }
@@ -659,6 +685,8 @@ export function registerTools(ctx, service, helpers) {
             // 图片没存上不该让整次调用变成「失败」：物品其实已经记好了，重试会产生重复记录
             photoNote = `\n⚠ 物品已记录，但图片没存上：${error?.message || error}`;
           }
+        } else if (userImageMentioned(exec)) {
+          photoNote = '\n⚠ 这条消息里像是有图，但没认出可读的图片（链接可能被截断或格式特殊）：物品已记录，图可以单独再发一次';
         }
       }
       return {
@@ -712,7 +740,12 @@ export function registerTools(ctx, service, helpers) {
       const result = await service.removeItem(args.id);
       if (!result.ok) return result;
       const removed = result.data.removedPhotos || 0;
-      return { ok: true, text: `已删除收纳记录 ${args.id}${removed ? `（一起删掉 ${removed} 张照片）` : '（照片被别的记录引用，保留着）'}` };
+      const retained = result.data.retainedPhotos || 0;
+      let note = '';
+      if (removed) note = `，一起删掉 ${removed} 张照片`;
+      if (retained) note += `${note ? '；' : '，'}另有 ${retained} 张照片还被别的记录引用，保留着`;
+      if (!removed && !retained) note = '，这条记录没有照片';
+      return { ok: true, text: `已删除收纳记录 ${args.id}${note}` };
     },
   }));
 

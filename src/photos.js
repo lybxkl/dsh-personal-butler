@@ -13,17 +13,57 @@
  * - 配了 apiToken 时，图片 URL 带 HMAC 签名（<img> 带不了请求头）。
  */
 
-import { createHmac, timingSafeEqual } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve, sep } from 'node:path';
 
 import { newId, nowIso, safeText } from './util.js';
+
+/** 引用太长时取哈希：normalizePhoto 只留 200 字符，截断后的 key 永远对不上。 */
+function shortKey(prefix, value) {
+  const text = String(value || '');
+  if (text.length <= 120) return `${prefix}${text}`;
+  return `${prefix}${createHash('sha256').update(text).digest('hex').slice(0, 32)}`;
+}
+
+/** 键排序后再序列化：同一份 ref 只有键顺序不同时不能被算成两张不同的图。 */
+function stableStringify(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  const keys = Object.keys(value).sort();
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`;
+}
 
 /** 附件引用的稳定身份：同一张图被重复保存时按它去重。 */
 function refIdOf(ref) {
   const id = String(ref?.attachmentId ?? ref?.id ?? ref?.sha256 ?? '').trim();
-  if (id) return `attach:${id}`;
-  return `attach:${JSON.stringify(ref ?? {}).slice(0, 160)}`;
+  if (id) return shortKey('attach:', id);
+  return shortKey('attach:', stableStringify(ref ?? {}));
+}
+
+/** 主机是不是本机 / 内网：图片链接来自聊天正文，不能让它变成打内网的跳板。 */
+function hostIsPrivate(hostname) {
+  const host = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!host) return true;
+  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) return true;
+  if (!host.includes(':')) {
+    const parts = host.split('.');
+    if (parts.length !== 4 || parts.some((x) => !/^\d{1,3}$/.test(x))) return !host.includes('.'); // 单标签主机名也拒
+    const nums = parts.map(Number);
+    if (nums.some((x) => x > 255)) return true;
+    const [a, b] = nums;
+    if (a === 0 || a === 10 || a === 127) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true;
+    if (a >= 224) return true;
+    return false;
+  }
+  if (host === '::1' || host === '::') return true;
+  if (host.startsWith('fc') || host.startsWith('fd') || host.startsWith('fe80')) return true;
+  return false;
 }
 
 export const MAX_PHOTO_BYTES = 8 * 1024 * 1024;
@@ -81,7 +121,7 @@ export function verifyPhotoSignature(id, query, secret) {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-export function createPhotos({ dir, store, logger, secret = '', fetchImpl = null }) {
+export function createPhotos({ dir, store, logger, secret = '', fetchImpl = null, fileRoots = null }) {
   const root = join(dir, 'photos');
   try {
     // 和账本一致：只有当前用户能进/能读
@@ -90,6 +130,10 @@ export function createPhotos({ dir, store, logger, secret = '', fetchImpl = null
     logger?.warn?.(`butler: 照片目录创建失败 ${root}: ${error?.message || error}`);
   }
   const rootAbs = resolve(root);
+  // 允许从哪些目录读本地图片：QQ 机器人下载目录、临时目录、当前工作目录。
+  // 路径来自聊天正文（外部输入），不设边界就等于让任何能发消息的人读本机任意图片文件。
+  const allowedFileRoots = (Array.isArray(fileRoots) && fileRoots.length ? fileRoots : [tmpdir(), process.cwd()])
+    .map((item) => resolve(String(item)));
 
   /** 把记录解析成绝对路径；文件名不合法或逃出目录一律当不存在。 */
   function filePath(record) {
@@ -106,7 +150,6 @@ export function createPhotos({ dir, store, logger, secret = '', fetchImpl = null
     return { count: records.length, bytes };
   }
 
-  /** 落盘并登记；返回 photos 记录。 */
   /**
    * 落盘并登记；返回 photos 记录。
    * 带 refId 时先去重：同一张图被保存多次（用户重说一遍、模型重复调用）只留一份。
@@ -166,19 +209,38 @@ export function createPhotos({ dir, store, logger, secret = '', fetchImpl = null
    * 只读这一个文件，超限直接拒绝，不把整个目录扫一遍。
    */
   function saveFile(filePath, { itemId = null } = {}) {
-    const abs = resolve(String(filePath || ''));
+    const input = String(filePath || '');
+    // UNC 与设备路径（\\attacker\share\a.png、\\.\pipe、\\?\...）会让 Windows 去连远端主机：
+    // 一条聊天消息就能把进程卡在 SMB 凭据握手上，还会向对方泄露 NTLM。直接拒绝。
+    if (/^[\\/]{2}/.test(input) || /^\\[.?]\\/.test(input)) {
+      throw new Error('不支持网络共享或设备路径的图片，请先把图存到本地');
+    }
+    const raw = resolve(input);
+    let abs;
+    try {
+      // realpath 解开符号链接：否则一个指向系统文件的链接就能绕过下面的目录检查
+      abs = realpathSync(raw);
+    } catch {
+      throw new Error('读不到这张图（文件不存在或没有权限）');
+    }
+    const inside = allowedFileRoots.some((base) => abs === base || abs.startsWith(base + sep));
+    // QQ 机器人把图放在 <home>/.dsh-qqbot/...，不一定在 tmp/cwd 之下，单独放行这一层
+    const qqMedia = `${sep}.dsh-qqbot${sep}`;
+    if (!inside && !abs.includes(qqMedia)) {
+      throw new Error('只能读取 QQ 机器人下载目录、临时目录或工作目录里的图片');
+    }
     let stat;
     try {
       stat = statSync(abs);
     } catch {
-      throw new Error(`读不到这张图（文件不存在：${abs}）`);
+      throw new Error('读不到这张图（文件不存在或没有权限）');
     }
     if (!stat.isFile()) throw new Error('这不是一个图片文件');
     if (stat.size > MAX_PHOTO_BYTES) {
       throw new Error(`图片太大了（${Math.round(stat.size / 1024)}KB，上限 ${MAX_PHOTO_BYTES / 1024 / 1024}MB）`);
     }
     const buffer = readFileSync(abs);
-    return saveBuffer({ data: buffer, itemId, refId: `file:${abs}` });
+    return saveBuffer({ data: buffer, itemId, refId: shortKey('file:', abs) });
   }
 
   /**
@@ -195,8 +257,10 @@ export function createPhotos({ dir, store, logger, secret = '', fetchImpl = null
       throw new Error('图片链接格式不对');
     }
     if (current.protocol !== 'http:' && current.protocol !== 'https:') throw new Error('图片链接只支持 http/https');
-    // 先查重再下载：同一条链接被重复处理时不必再发一次请求
-    const seen = store.list('photos').find((photo) => photo.refId === `url:${current.href}`);
+    if (hostIsPrivate(current.hostname)) throw new Error('这个链接指向本机或内网地址，出于安全考虑不下载');
+    // 先查重再下载：同一条链接被重复处理时不必再发一次请求。身份用最终判断前的 URL，跳转不会改变它
+    const key = shortKey('url:', current.href);
+    const seen = store.list('photos').find((photo) => photo.refId === key);
     if (seen) return seen;
     for (let hop = 0; hop <= 3; hop += 1) {
       const response = await doFetch(current.href, {
@@ -205,6 +269,7 @@ export function createPhotos({ dir, store, logger, secret = '', fetchImpl = null
         headers: { accept: 'image/*' },
       });
       if (response.status >= 300 && response.status < 400) {
+        await response.body?.cancel?.().catch?.(() => {});
         const location = response.headers?.get?.('location');
         if (!location) throw new Error(`图片链接跳转没有目标（HTTP ${response.status}）`);
         const next = new URL(location, current);
@@ -218,7 +283,7 @@ export function createPhotos({ dir, store, logger, secret = '', fetchImpl = null
         throw new Error(`图片太大了（${Math.round(declared / 1024)}KB，上限 ${MAX_PHOTO_BYTES / 1024 / 1024}MB）`);
       }
       const buffer = await readBodyLimited(response, MAX_PHOTO_BYTES);
-      return saveBuffer({ data: buffer, itemId, refId: `url:${current.href}` });
+      return saveBuffer({ data: buffer, itemId, refId: key });
     }
     throw new Error('图片链接跳转太多次了（最多 3 跳）');
   }
@@ -263,11 +328,19 @@ export function createPhotos({ dir, store, logger, secret = '', fetchImpl = null
     return store.find('photos', id) || null;
   }
 
-  /** 复制一张已存照片（同一张图要挂到另一个物件上时用；新记录不继承 refId，免得又被去重回去）。 */
+  /**
+   * 复制一张已存照片（同一张图要挂到另一个物件上时用）。
+   * 新记录的 refId 记成 `copy:<来源>:<物件>`：同一个物件再存一次同一来源时能认出来，
+   * 直接复用这一份，不会越复制越多；同时它又不会被原图的去重键误伤。
+   */
   function copy(record, { itemId = null } = {}) {
     const loaded = read(record?.id);
     if (!loaded) throw new Error('原照片读不到了（可能已经被删）');
-    return saveBuffer({ data: loaded.buffer, mime: loaded.mime, itemId });
+    const source = record?.refId || record?.id || 'unknown';
+    const refId = itemId ? `copy:${source}:${itemId}` : null;
+    const existing = refId ? findByRef(refId) : null;
+    if (existing) return existing;
+    return saveBuffer({ data: loaded.buffer, mime: loaded.mime, itemId, refId });
   }
 
   /** 按来源身份查已存照片（附件 id / 本地路径 / 远程链接）。 */

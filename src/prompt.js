@@ -92,7 +92,9 @@ export const BUTLER_PROMPT = `## 私人管家（butler）
 → 用户问「XX 在哪」→ 先 \`butler_item_find\`（名称/位置/备注/标签都能搜），再按结果回答位置、数量、放的时间、有没有照片。
   查不到就说没记过，并问一句最近一次见到大概在哪儿，顺手补记。
 → 东西换位置了 → \`butler_item_save\` 带 id 更新（不要新建，否则以后搜出两条互相矛盾）。
-→ 记录要删（东西拿走了）→ 先确认，再 \`butler_item_delete\`（照片会一起删）。
+→ 加照片：带 id 更新时 \`photoIds\` 是**追加**（只带这次新拍的图，不会冲掉原来的）；要摘掉某张用 \`removePhotoIds\`；
+   整组换掉才用 \`replacePhotos: true\`。不要用 \`photoIds: []\` 表示「删光」——那是「这次不动照片」。
+→ 记录要删（东西拿走了）→ 先确认，再 \`butler_item_delete\`（照片会一起删，仍被别的记录引用的会保留）。
 
 ### 收到定时提醒时
 宿主会投递以 \`[SCHEDULE REMINDER]\` 开头的消息，那是到点提醒：

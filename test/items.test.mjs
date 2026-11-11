@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -221,14 +221,24 @@ test('照片：从物件上摘掉后就能删（不再被当成「还挂在物�
   assert.equal(created.ok, true);
   const itemId = created.data.record.id;
 
-  const detached = await service.upsertItem({ id: itemId, name: '备用钥匙', location: '玄关', photoIds: [] });
+  // 更新默认是追加：photoIds: [] 不再表示「全部摘掉」，要摘必须显式 removePhotoIds
+  const appended = await service.upsertItem({ id: itemId, name: '备用钥匙', location: '玄关', photoIds: [] });
+  assert.equal(appended.ok, true);
+  assert.equal(appended.data.record.photoCount, 1);
+
+  const stillAttached = await service.removePhoto(photo.id);
+  assert.equal(stillAttached.ok, false);
+  assert.match(stillAttached.error, /还挂在/);
+
+  const detached = await service.upsertItem({ id: itemId, name: '备用钥匙', location: '玄关', removePhotoIds: [photo.id] });
   assert.equal(detached.ok, true);
   assert.equal(detached.data.record.photoCount, 0);
-  assert.equal(photos.find(photo.id).itemId, null);
+  // 摘掉时就该把没人引用的照片一起删掉，不留幽灵文件
+  assert.equal(photos.find(photo.id), null);
 
   const dropped = await service.removePhoto(photo.id);
-  assert.equal(dropped.ok, true);
-  assert.equal(photos.find(photo.id), null);
+  assert.equal(dropped.ok, false);
+  assert.match(dropped.error, /不存在/);
 });
 
 test('收纳：未来的「什么时候放的」被拒绝，说清怎么改', async () => {
@@ -438,4 +448,140 @@ test('照片：远程链接的异常都明确失败（协议 / 状态码 / 非�
     () => make(async () => new Response('', { status: 302, headers: { location: 'ftp://x.test/a.jpg' } })).saveUrl('https://x.test/d.jpg'),
     /不支持的协议/,
   );
+});
+
+test('照片路径：网络共享路径与目录外路径都拒绝（不能读本机任意图片）', () => {
+  const { photos } = makeService();
+  assert.throws(() => photos.saveFile('\\\\attacker\\share\\a.png'), /网络共享|设备路径/);
+  assert.throws(() => photos.saveFile('\\\\.\\pipe\\x.jpg'), /网络共享|设备路径/);
+
+  // 用一个很窄的 fileRoots 造「目录外」：tmp 里的图不在允许目录内时必须拒绝
+  const base = mkdtempSync(join(tmpdir(), 'butler-roots-'));
+  const allowed = join(base, 'allowed');
+  mkdirSync(allowed, { recursive: true });
+  const outside = join(base, 'outside.png');
+  writeFileSync(outside, PNG_BUFFER);
+  const narrow = createPhotos({ dir: base, store: new Store({ filePath: join(base, 'butler.json') }).load(), fileRoots: [allowed] });
+  assert.throws(() => narrow.saveFile(outside), /只能读取 QQ 机器人下载目录、临时目录或工作目录/);
+  const inside = join(allowed, 'ok.png');
+  writeFileSync(inside, PNG_BUFFER);
+  assert.ok(narrow.saveFile(inside).id);
+});
+
+test('照片链接：本机与内网地址直接拒绝，不给探测机会', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'butler-ssrf-'));
+  const store = new Store({ filePath: join(dir, 'butler.json') }).load();
+  let hits = 0;
+  const photos = createPhotos({ dir, store, fetchImpl: async () => { hits += 1; return new Response(PNG_BUFFER); } });
+  for (const url of [
+    'http://127.0.0.1:8080/a.png',
+    'http://localhost/a.png',
+    'http://169.254.169.254/latest/meta-data/a.png',
+    'http://[::1]/a.png',
+    'http://192.168.1.2/a.png',
+    'http://10.0.0.5/a.png',
+    'http://0x7f000001/a.png',
+  ]) {
+    await assert.rejects(() => photos.saveUrl(url), /本机或内网/);
+  }
+  assert.equal(hits, 0);
+});
+
+test('照片去重：超长 QQ 链接按哈希存 refId，重复保存不再下载也不再占磁盘', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'butler-longurl-'));
+  const store = new Store({ filePath: join(dir, 'butler.json') }).load();
+  let hits = 0;
+  const photos = createPhotos({ dir, store, fetchImpl: async () => { hits += 1; return new Response(PNG_BUFFER); } });
+  const longUrl = 'https://multimedia.nt.qq.com.cn/download?appid=1406&fileid=' + 'A'.repeat(300) + '&rkey=' + 'B'.repeat(200) + '&spec=0';
+  const first = await photos.saveUrl(longUrl);
+  const again = await photos.saveUrl(longUrl);
+  assert.equal(first.id, again.id);
+  assert.equal(hits, 1);
+  assert.equal(store.list('photos').length, 1);
+  // 落盘的 refId 必须短到不会被 normalizePhoto 的 200 字符截断
+  assert.ok(String(store.list('photos')[0].refId).length <= 200);
+});
+
+test('照片：同一批里重复的 id 只复制一份，不会白占两张', async () => {
+  const { service, photos, store } = makeService();
+  const a = await service.upsertItem({ name: 'A', location: '桌子' });
+  const b = await service.upsertItem({ name: 'B', location: '桌子' });
+  const photo = photos.saveBuffer({ data: PNG_BUFFER, mime: 'image/png' });
+  await service.attachPhotos(a.data.record.id, [photo.id]);
+  const before = store.list('photos').length;
+  const shared = await service.attachPhotos(b.data.record.id, [photo.id, photo.id, { id: photo.id }]);
+  assert.equal(shared.ok, true);
+  assert.equal(shared.data.record.photoCount, 1);
+  assert.equal(store.list('photos').length, before + 1);
+});
+
+test('照片：更新默认追加（只带新图不会冲掉旧图），replacePhotos 才整体替换', async () => {
+  const { service, photos } = makeService();
+  const first = photos.saveDataUrl('data:image/png;base64,' + PNG_BASE64);
+  const created = await service.upsertItem({ name: '工具箱', location: '阳台', photoIds: [first.id] });
+  assert.equal(created.ok, true);
+  const itemId = created.data.record.id;
+  const second = photos.saveDataUrl('data:image/png;base64,' + PNG_BASE64);
+
+  const merged = await service.upsertItem({ id: itemId, name: '工具箱', photoIds: [second.id] });
+  assert.equal(merged.ok, true);
+  assert.equal(merged.data.record.photoCount, 2);
+
+  const replaced = await service.upsertItem({ id: itemId, name: '工具箱', photoIds: [second.id], replacePhotos: true });
+  assert.equal(replaced.ok, true);
+  assert.equal(replaced.data.record.photoCount, 1);
+  // 被替换掉、又没人引用的旧图要连文件一起删掉
+  assert.equal(photos.find(first.id), null);
+});
+
+test('照片：同一张图给第二个物件只复制一次，再挂不会重复复制', async () => {
+  const { service, photos, store } = makeService();
+  const a = await service.upsertItem({ name: 'A', location: '客厅' });
+  const b = await service.upsertItem({ name: 'B', location: '客厅' });
+  const photo = photos.saveDataUrl('data:image/png;base64,' + PNG_BASE64);
+  await service.attachPhotos(a.data.record.id, [photo.id]);
+
+  const one = await service.attachPhotos(b.data.record.id, [photo.id]);
+  assert.equal(one.ok, true);
+  assert.equal(one.data.attached, 1);
+  const again = await service.attachPhotos(b.data.record.id, [photo.id]);
+  assert.equal(again.ok, true);
+  assert.equal(again.data.attached, 0);
+  assert.equal(store.list('photos').length, 2);
+});
+
+test('照片：复制失败时把真实原因带出来，不伪装成「已被占用」', async () => {
+  const { service, photos, store } = makeService();
+  const a = await service.upsertItem({ name: 'A', location: '客厅' });
+  const b = await service.upsertItem({ name: 'B', location: '客厅' });
+  const photo = photos.saveDataUrl('data:image/png;base64,' + PNG_BASE64);
+  await service.attachPhotos(a.data.record.id, [photo.id]);
+  unlinkSync(join(photos.root, store.find('photos', photo.id).file));
+
+  const failed = await service.attachPhotos(b.data.record.id, [photo.id]);
+  assert.equal(failed.ok, false);
+  assert.match(failed.error, /原照片读不到/);
+});
+
+test('收纳：删物件会清掉「itemId 指向它但没进 photoIds」的幽灵照片', async () => {
+  const { service, photos, store } = makeService();
+  const created = await service.upsertItem({ name: '雨伞', location: '玄关' });
+  const itemId = created.data.record.id;
+  const photo = photos.saveDataUrl('data:image/png;base64,' + PNG_BASE64);
+  store.patch('photos', photo.id, { itemId });
+
+  const removed = await service.removeItem(itemId);
+  assert.equal(removed.ok, true);
+  assert.equal(removed.data.removedPhotos, 1);
+  assert.equal(photos.find(photo.id), null);
+});
+
+test('照片：photoIds 传 null 与不传一样，都表示「这次不动照片」', async () => {
+  const { service, photos } = makeService();
+  const photo = photos.saveDataUrl('data:image/png;base64,' + PNG_BASE64);
+  const created = await service.upsertItem({ name: '胶带', location: '抽屉', photoIds: [photo.id] });
+  const itemId = created.data.record.id;
+  const updated = await service.upsertItem({ id: itemId, name: '胶带', photoIds: null });
+  assert.equal(updated.ok, true);
+  assert.equal(updated.data.record.photoCount, 1);
 });

@@ -3579,7 +3579,7 @@
                     setDraft(Object.assign({}, current, patch));
                   },
                   onSubmit: function () {
-                    props.onSave(Object.assign({ id: item.id }, current, { photoIds: keep }), function (ok) {
+                    props.onSave(Object.assign({ id: item.id }, current, { photoIds: keep, replacePhotos: true }), function (ok) {
                       if (!ok) return;
                       // 保存成功后再删被摘掉的图片文件；删不掉也不影响记录（后端会拒绝删还挂着的图）
                       removedOnSave.forEach(props.onDropPhoto);

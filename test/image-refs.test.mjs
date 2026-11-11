@@ -8,6 +8,7 @@ import {
   takeImagePaths,
   takeImageRefs,
   takeImageUrls,
+  userImageMentioned,
   userImagePaths,
   userImageUrls,
   userImageRefs,
@@ -109,4 +110,86 @@ test('图片地址：QQ 有时给 https 链接，单独认；且不会被当成�
   assert.deepEqual(userImageUrls(exec), [url]);
   assert.deepEqual(userImagePaths(exec), []);
   assert.equal(userImageUrls({}).length, 0);
+});
+
+test('图片路径：空格、引号、全角冒号、项目符号、行尾 [图片] 都要认', () => {
+  const cases = [
+    '- Image: C:/Users/John Smith/.dsh-qqbot/media/a b.jpg',
+    '* Image: C:/tmp/x.png',
+    '• Image: C:/tmp/y.webp',
+    '- Image：C:/tmp/fullwidth.gif',
+    '- Image: "C:/tmp/quoted.jpg"',
+    "- Image: 'C:/tmp/single.jpg'",
+    '- Image: C:/tmp/trailing.jpg [图片]',
+    '- Image: C:/tmp/a(1).jpg',
+  ];
+  for (const line of cases) {
+    const got = takeImagePaths([txt(line)]);
+    assert.equal(got.length, 1, line);
+  }
+  assert.deepEqual(takeImagePaths([txt('- Image: C:/Users/John Smith/a b.jpg')]), ['C:/Users/John Smith/a b.jpg']);
+});
+
+test('图片地址：&amp; 反转义、全角冒号、两个 Image 挤在一行也要拆开', () => {
+  assert.deepEqual(
+    takeImageUrls([txt('- Image: https://x.test/a.jpg?x=1&amp;rkey=abc')]),
+    ['https://x.test/a.jpg?x=1&rkey=abc'],
+  );
+  assert.deepEqual(
+    takeImageUrls([txt('- Image: https://x.test/a.jpg - Image: https://x.test/b.png')]),
+    ['https://x.test/a.jpg', 'https://x.test/b.png'],
+  );
+  assert.deepEqual(takeImagePaths([txt('- Image: C:/a.jpg - Image: C:/b.png')]), ['C:/a.jpg', 'C:/b.png']);
+});
+
+test('图片选择：只从同一条消息里抽，不会把附件和路径凑成两张图', () => {
+  const exec = {
+    agent: {
+      inbox: { nextTurn: [{ content: [txt('- Image: C:/tmp/new.png')] }], nextStep: [] },
+      session: {
+        deriveMessages: () => [
+          { role: 'user', content: [img('old-attachment')] },
+          { role: 'user', content: [txt('新的这张放哪？')] },
+        ],
+      },
+    },
+  };
+  // 本轮有新图：三个来源都只应看本轮，不能把上一条的附件也算进来
+  assert.deepEqual(userImageRefs(exec), []);
+  assert.deepEqual(userImagePaths(exec), ['C:/tmp/new.png']);
+  assert.deepEqual(userImageUrls(exec), []);
+});
+
+test('图片选择：往回看 3 条仍命中，定时提醒不占窗口', () => {
+  const messages = [
+    { role: 'user', content: [txt('- Image: C:/tmp/target.jpg')] },
+    { role: 'user', content: [txt('这个放书房')] },
+    { role: 'user', content: [txt('[SCHEDULE REMINDER]\n到点了')] },
+    { role: 'user', content: [txt('1')] },
+    { role: 'assistant', content: [txt('好')] },
+  ];
+  const exec = { agent: { session: { deriveMessages: () => messages } } };
+  assert.deepEqual(userImagePaths(exec), ['C:/tmp/target.jpg']);
+});
+
+test('图片路径：tool-result 里的 Image 行不能当用户发的图', () => {
+  const content = [{ type: 'tool-result', content: [txt('- Image: http://127.0.0.1:8080/a.png')] }];
+  assert.deepEqual(takeImageUrls(content), []);
+  assert.deepEqual(takeImagePaths(content), []);
+});
+
+test('图片解析失败但正文确实提到 Image 时，能提示「没认出来」', () => {
+  const exec = {
+    agent: {
+      session: {
+        deriveMessages: () => [
+          { role: 'user', content: [txt('- Image:')] },
+          { role: 'assistant', content: [txt('好的')] },
+        ],
+      },
+    },
+  };
+  assert.equal(userImageMentioned(exec), true);
+  const none = { agent: { session: { deriveMessages: () => [{ role: 'user', content: [txt('没有图')] }] } } };
+  assert.equal(userImageMentioned(none), false);
 });

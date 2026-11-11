@@ -883,29 +883,52 @@ export function createService({ store, config, kinds, credentials, quota, remind
     return done({ items: list.slice(0, limit).map(itemView), total, shown: Math.min(total, limit), limit });
   }
 
-  /** 把入参里的照片 id 校验成「已登记、且没被别的物件占用」的字符串 id。 */
+  /** 把入参里的照片 id 规整成去重后的字符串数组；undefined / null 表示「这次没提照片」。 */
+  function photoIdList(rawIds, label = 'photoIds') {
+    if (rawIds === undefined || rawIds === null) return { ids: null };
+    const list = Array.isArray(rawIds) ? rawIds : [rawIds];
+    const ids = [];
+    for (const raw of list) {
+      const id = typeof raw === 'string' ? raw : raw && typeof raw === 'object' ? raw.id : '';
+      if (!id) return { error: `${label} 里有认不出来的元素：要传照片 id（字符串），不是整个照片对象` };
+      if (!ids.includes(id)) ids.push(id);
+    }
+    return { ids };
+  }
+
   /**
    * 图片要挂到某个物件时，如果它已经属于别的物件（一张照片里有两个东西很常见），复制一份再挂：
    * 直接共享会让「删其中一个物件」的逻辑变复杂，复制一份最省心，代价只是多占一张图的空间。
+   * copiedOut 收下本次复制出来的 id：后面任何一步失败都要把它们删掉，别留没人引用的幽灵。
    */
-  function claimPhotoIds(rawIds, ownerId) {
+  function claimPhotoIds(rawIds, ownerId, copiedOut) {
     if (rawIds === undefined || rawIds === null) return rawIds;
     const list = Array.isArray(rawIds) ? rawIds : [rawIds];
+    const claimed = new Map();
     return list.map((raw) => {
       const id = typeof raw === 'string' ? raw : raw && typeof raw === 'object' ? raw.id : '';
-      const photo = id ? store.find('photos', id) : null;
-      if (!photo || !photo.itemId || photo.itemId === ownerId) return raw;
-      if (!photosModule || typeof photosModule.copy !== 'function') return raw;
-      try {
-        return photosModule.copy(photo, { itemId: ownerId }).id;
-      } catch {
+      if (!id) return raw;
+      if (claimed.has(id)) return claimed.get(id);
+      const photo = store.find('photos', id);
+      if (!photo || !photo.itemId || photo.itemId === ownerId) {
+        claimed.set(id, raw);
         return raw;
       }
+      if (!photosModule || typeof photosModule.copy !== 'function') {
+        throw new Error(`照片 ${id} 已经挂在别的物件上了，而且当前实例不能复制照片`);
+      }
+      // 复制失败（原图读不到 / 照片总量到上限）要把真实原因带出去，不能伪装成「已被占用」
+      const copied = photosModule.copy(photo, { itemId: ownerId });
+      if (!copied || !copied.id) throw new Error(`照片 ${id} 复制失败（详情看宿主日志）`);
+      copiedOut?.push(copied.id);
+      claimed.set(id, copied.id);
+      return copied.id;
     });
   }
 
   function resolvePhotoIds(rawIds, ownerId) {
-    if (rawIds === undefined) return { ids: null };
+    // 与 claimPhotoIds 保持一致：null 也是「这次没提照片」，不要报「必须是数组」
+    if (rawIds === undefined || rawIds === null) return { ids: null };
     if (!Array.isArray(rawIds)) return { error: 'photoIds 必须是数组（元素是照片 id）' };
     const ids = [];
     for (const raw of rawIds) {
@@ -918,6 +941,25 @@ export function createService({ store, config, kinds, credentials, quota, remind
     }
     if (ids.length > 12) return { error: `一件东西最多挂 12 张照片，这次给了 ${ids.length} 张` };
     return { ids };
+  }
+
+  /** 删照片时只删「没有别的物件在引用」的那些；还在用的过继给它。 */
+  function releasePhotos(ids, keepItemId) {
+    let removed = 0;
+    let retained = 0;
+    for (const photoId of ids) {
+      const other = store.list('items').find((item) => item.id !== keepItemId && (item.photoIds || []).includes(photoId));
+      if (other) {
+        store.patch('photos', photoId, { itemId: other.id });
+        retained += 1;
+      } else if (photosModule?.remove?.(photoId)) {
+        removed += 1;
+      } else {
+        // 文件可能早就没了：至少把记录清掉，别留死链
+        store.remove('photos', photoId);
+      }
+    }
+    return { removed, retained };
   }
 
   async function upsertItem(input) {
@@ -951,27 +993,69 @@ export function createService({ store, config, kinds, credentials, quota, remind
     }
     if (record.quantity !== null && (record.quantity < 0 || record.quantity > 1e6)) return fail('数量要在 0 ~ 1000000 之间');
 
-    const resolved = resolvePhotoIds(claimPhotoIds(input.photoIds, record.id || existing?.id), record.id || existing?.id);
-    if (resolved.error) return fail(resolved.error);
+    const ownerId = existing?.id;
+    const incoming = photoIdList(input.photoIds);
+    if (incoming.error) return fail(incoming.error);
+    const removing = photoIdList(input.removePhotoIds, 'removePhotoIds');
+    if (removing.error) return fail(removing.error);
+
+    const currentIds = (existing?.photoIds || []).filter((id) => store.find('photos', id));
+    let nextIds = [...currentIds];
+    let removedIds = [];
+    if (incoming.ids !== null) {
+      if (input.replacePhotos === true) {
+        // 显式整体替换（面板「只保留这几张」）
+        removedIds = currentIds.filter((id) => !incoming.ids.includes(id));
+        nextIds = [...incoming.ids];
+      } else {
+        // 更新默认是「追加」：模型只带这次新拍的图，不该把原来的照片冲掉
+        for (const id of incoming.ids) if (!nextIds.includes(id)) nextIds.push(id);
+      }
+    }
+    for (const id of removing.ids || []) {
+      const index = nextIds.indexOf(id);
+      if (index >= 0) nextIds.splice(index, 1);
+      if (currentIds.includes(id) && !removedIds.includes(id)) removedIds.push(id);
+    }
+    if (nextIds.length > 12) {
+      return fail(`一件东西最多挂 12 张照片，这次会变成 ${nextIds.length} 张：先移除几张旧的再挂新的`);
+    }
+
+    const copies = [];
+    let resolved;
+    try {
+      resolved = resolvePhotoIds(claimPhotoIds(nextIds, ownerId, copies), ownerId);
+    } catch (error) {
+      for (const id of copies) photosModule?.remove?.(id);
+      return fail(error?.message || String(error));
+    }
+    if (resolved.error) {
+      for (const id of copies) photosModule?.remove?.(id);
+      return fail(resolved.error);
+    }
     const photoIds = resolved.ids === null ? [...record.photoIds] : resolved.ids;
     // 只保留真正存在的照片（防止照片记录被删后 item.photoIds 留死链）
     record.photoIds = photoIds.filter((id) => store.find('photos', id));
-    for (const id of record.photoIds) {
-      const photo = store.find('photos', id);
-      if (photo && photo.itemId !== record.id) store.patch('photos', id, { itemId: record.id });
-    }
-    // 从这条记录上摘掉的图要解绑，否则它既不属于任何物件、又因为「还挂在物件上」而删不掉
-    for (const photo of store.list('photos')) {
-      if (photo.itemId === record.id && !record.photoIds.includes(photo.id)) {
-        store.patch('photos', photo.id, { itemId: null });
-      }
-    }
 
     const saved = store.put('items', record);
+    // 绑定归属要等落库拿到 id 之后再写，否则新建记录时照片会挂在 undefined 上
+    for (const id of saved.photoIds || []) {
+      const photo = store.find('photos', id);
+      if (photo && photo.itemId !== saved.id) store.patch('photos', id, { itemId: saved.id });
+    }
+    // 这次摘掉的图，以及 itemId 指向它却没进 photoIds 的幽灵：有人还引用就过继，没人用就真删
+    const keep = new Set(saved.photoIds || []);
+    const stale = new Set(removedIds);
+    for (const photo of store.list('photos')) {
+      if (photo.itemId === saved.id && !keep.has(photo.id)) stale.add(photo.id);
+    }
+    const cleaned = releasePhotos([...stale], saved.id);
     hooks?.onDataChanged?.('items');
     const view = itemView(store.find('items', saved.id));
     return done({
       record: view,
+      ...(cleaned.removed ? { removedPhotos: cleaned.removed } : {}),
+      ...(cleaned.retained ? { retainedPhotos: cleaned.retained } : {}),
       ...(record.photoIds.length < photoIds.length
         ? { warning: `有 ${photoIds.length - record.photoIds.length} 张照片找不到，已经忽略` }
         : {}),
@@ -983,12 +1067,27 @@ export function createService({ store, config, kinds, credentials, quota, remind
     const item = store.find('items', itemId);
     if (!item) return fail(`物品 ${itemId} 不存在`);
     const existing = (item.photoIds || []).filter((id) => store.find('photos', id));
-    const resolved = resolvePhotoIds(claimPhotoIds(photoIds, itemId), itemId);
-    if (resolved.error) return fail(resolved.error);
-    const added = resolved.ids.filter((id) => !existing.includes(id));
-    if (existing.length + added.length > 12) {
-      return fail(`这件东西已经有 ${existing.length} 张照片，最多 12 张；这次要加的 ${added.length} 张没挂上`);
+    const incoming = photoIdList(photoIds);
+    if (incoming.error) return fail(incoming.error);
+    if (incoming.ids === null) return fail('缺少要挂的照片 id');
+    // 先去重再算上限：同一张图在入参里出现两次不该复制两份；超 12 张时也不能先白复制副本
+    const unique = incoming.ids.filter((id) => !existing.includes(id));
+    if (existing.length + unique.length > 12) {
+      return fail(`这件东西已经有 ${existing.length} 张照片，最多 12 张；这次要加的 ${unique.length} 张没挂上`);
     }
+    const copies = [];
+    let resolved;
+    try {
+      resolved = resolvePhotoIds(claimPhotoIds(unique, itemId, copies), itemId);
+    } catch (error) {
+      for (const id of copies) photosModule?.remove?.(id);
+      return fail(error?.message || String(error));
+    }
+    if (resolved.error) {
+      for (const id of copies) photosModule?.remove?.(id);
+      return fail(resolved.error);
+    }
+    const added = resolved.ids.filter((id) => !existing.includes(id));
     const merged = [...existing, ...added];
     for (const id of merged) {
       const photo = store.find('photos', id);
@@ -1002,20 +1101,13 @@ export function createService({ store, config, kinds, credentials, quota, remind
   async function removeItem(id) {
     const item = store.find('items', id);
     if (!item) return fail(`物品 ${id} 不存在`);
-    let removedPhotos = 0;
-    for (const photoId of item.photoIds || []) {
-      // 只删属于这条物件的照片；同一张图被多条引用时保留，并把它交还给仍引用它的物件
-      const others = store.list('items').filter((other) => other.id !== id && (other.photoIds || []).includes(photoId));
-      if (!others.length) {
-        photosModule.remove(photoId);
-        removedPhotos += 1;
-      } else {
-        store.patch('photos', photoId, { itemId: others[0].id });
-      }
-    }
+    // 既看 photoIds，也看 itemId：历史上限/校验失败留下过「指向这个物件但没进 photoIds」的副本
+    const mine = new Set(item.photoIds || []);
+    for (const photo of store.list('photos')) if (photo.itemId === id) mine.add(photo.id);
+    const { removed, retained } = releasePhotos([...mine], id);
     store.remove('items', id);
     hooks?.onDataChanged?.('items');
-    return done({ deleted: true, id, removedPhotos });
+    return done({ deleted: true, id, removedPhotos: removed, retainedPhotos: retained });
   }
 
   /** 删掉一张没挂在任何物品上的照片（面板取消/换图时用）。已被任何物件引用就拒绝。 */
