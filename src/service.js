@@ -884,6 +884,26 @@ export function createService({ store, config, kinds, credentials, quota, remind
   }
 
   /** 把入参里的照片 id 校验成「已登记、且没被别的物件占用」的字符串 id。 */
+  /**
+   * 图片要挂到某个物件时，如果它已经属于别的物件（一张照片里有两个东西很常见），复制一份再挂：
+   * 直接共享会让「删其中一个物件」的逻辑变复杂，复制一份最省心，代价只是多占一张图的空间。
+   */
+  function claimPhotoIds(rawIds, ownerId) {
+    if (rawIds === undefined || rawIds === null) return rawIds;
+    const list = Array.isArray(rawIds) ? rawIds : [rawIds];
+    return list.map((raw) => {
+      const id = typeof raw === 'string' ? raw : raw && typeof raw === 'object' ? raw.id : '';
+      const photo = id ? store.find('photos', id) : null;
+      if (!photo || !photo.itemId || photo.itemId === ownerId) return raw;
+      if (!photosModule || typeof photosModule.copy !== 'function') return raw;
+      try {
+        return photosModule.copy(photo, { itemId: ownerId }).id;
+      } catch {
+        return raw;
+      }
+    });
+  }
+
   function resolvePhotoIds(rawIds, ownerId) {
     if (rawIds === undefined) return { ids: null };
     if (!Array.isArray(rawIds)) return { error: 'photoIds 必须是数组（元素是照片 id）' };
@@ -931,7 +951,7 @@ export function createService({ store, config, kinds, credentials, quota, remind
     }
     if (record.quantity !== null && (record.quantity < 0 || record.quantity > 1e6)) return fail('数量要在 0 ~ 1000000 之间');
 
-    const resolved = resolvePhotoIds(input.photoIds, record.id || existing?.id);
+    const resolved = resolvePhotoIds(claimPhotoIds(input.photoIds, record.id || existing?.id), record.id || existing?.id);
     if (resolved.error) return fail(resolved.error);
     const photoIds = resolved.ids === null ? [...record.photoIds] : resolved.ids;
     // 只保留真正存在的照片（防止照片记录被删后 item.photoIds 留死链）
@@ -963,7 +983,7 @@ export function createService({ store, config, kinds, credentials, quota, remind
     const item = store.find('items', itemId);
     if (!item) return fail(`物品 ${itemId} 不存在`);
     const existing = (item.photoIds || []).filter((id) => store.find('photos', id));
-    const resolved = resolvePhotoIds(Array.isArray(photoIds) ? photoIds : [photoIds], itemId);
+    const resolved = resolvePhotoIds(claimPhotoIds(photoIds, itemId), itemId);
     if (resolved.error) return fail(resolved.error);
     const added = resolved.ids.filter((id) => !existing.includes(id));
     if (existing.length + added.length > 12) {

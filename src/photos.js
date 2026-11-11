@@ -263,6 +263,13 @@ export function createPhotos({ dir, store, logger, secret = '', fetchImpl = null
     return store.find('photos', id) || null;
   }
 
+  /** 复制一张已存照片（同一张图要挂到另一个物件上时用；新记录不继承 refId，免得又被去重回去）。 */
+  function copy(record, { itemId = null } = {}) {
+    const loaded = read(record?.id);
+    if (!loaded) throw new Error('原照片读不到了（可能已经被删）');
+    return saveBuffer({ data: loaded.buffer, mime: loaded.mime, itemId });
+  }
+
   /** 按来源身份查已存照片（附件 id / 本地路径 / 远程链接）。 */
   function findByRef(refId) {
     if (!refId) return null;
@@ -373,7 +380,7 @@ export function createPhotos({ dir, store, logger, secret = '', fetchImpl = null
     return { id: record.id, url: `${base}?${query}`, mime: record.mime, byteSize: record.byteSize };
   }
 
-  return { root, saveBuffer, saveFromRef, saveFile, saveUrl, saveDataUrl, find, findByRef, read, remove, countFor, reconcile, view, totalUsage };
+  return { root, saveBuffer, saveFromRef, saveFile, saveUrl, saveDataUrl, find, findByRef, copy, read, remove, countFor, reconcile, view, totalUsage };
 }
 
 /** 面板用的图片元数据（不带签名；需要带签名时用 createPhotos(...).view）。 */

@@ -128,24 +128,30 @@ test('收纳：查东西能搜名称/位置/备注，名称命中排前面', asy
   assert.equal(missing.data.total, 0);
 });
 
-test('收纳：已属于别的物品的照片不能挪过来', async () => {
+test('收纳：同一张图能被两个物件各自引用（第二个拿到副本，互不影响）', async () => {
   const { service, store, photos } = makeService();
   const first = await service.upsertItem({ name: '第一件', location: '书房' });
   const second = await service.upsertItem({ name: '第二件', location: '书房' });
   const photo = photos.saveBuffer({ data: PNG_BUFFER, mime: 'image/png' });
   await service.attachPhotos(first.data.record.id, [photo.id]);
 
-  const stolen = await service.upsertItem({
+  // 一张照片里有两个东西（桌上一个杯子 + 一瓶饮料）是常见情形：不能报错，也不能悄悄共享一条记录
+  const shared = await service.upsertItem({
     id: second.data.record.id,
     name: '第二件',
     location: '书房',
     photoIds: [photo.id],
   });
-  // 现在是明确的失败（以前是静默跳过）：否则调用方以为挂上了，面板却看不到图
-  assert.equal(stolen.ok, false);
-  assert.match(stolen.error, /已经挂在别的物件上/);
+  assert.equal(shared.ok, true);
+  assert.equal(shared.data.record.photoCount, 1);
+  const copyId = shared.data.record.photos[0].id;
+  assert.notEqual(copyId, photo.id);
+
+  // 原图仍归第一件；第二件拿的是自己的副本，删掉任一方都不影响另一方
   assert.equal(store.find('photos', photo.id).itemId, first.data.record.id);
-  assert.equal(store.find('items', second.data.record.id).photoIds.length, 0);
+  assert.equal(store.find('photos', copyId).itemId, second.data.record.id);
+  assert.equal(store.list('photos').length, 2);
+  assert.equal(service.findItems({ q: '第一件' }).data.items[0].photoCount, 1);
 });
 
 test('照片：只认真正的图片字节，dataURL 与大小都有边界', () => {

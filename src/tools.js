@@ -66,27 +66,14 @@ export function registerTools(ctx, service, helpers) {
     })();
     const ids = [];
     const skipped = [];
-    /** 已经挂在别的物件上的图不再重复挂（否则整条 attach 会被拒）。 */
-    const claimable = (refId) => {
-      const seen = typeof photos.findByRef === 'function' ? photos.findByRef(refId) : null;
-      return !seen || !seen.itemId || seen.itemId === ownerId;
-    };
+    // 同一张图已经在别的物件上也没关系：service.attachPhotos 会复制一份给这件东西
     for (const ref of picked) {
-      const refId = `attach:${String(ref?.attachmentId ?? ref?.id ?? '').trim()}`;
-      if (!claimable(refId)) {
-        skipped.push('这张图已经挂在别的物件上了');
-        continue;
-      }
       const record = await photos.saveFromRef(ref, { attachments });
       ids.push(record.id);
     }
     // QQ/微信通道：图片可能是本地文件路径，也可能是远程地址，按最多 12 张补上
     if (!wanted) {
       for (const path of paths.slice(-12)) {
-        if (!claimable(`file:${path}`)) {
-          skipped.push(`${path}（已经挂在别的物件上了）`);
-          continue;
-        }
         try {
           ids.push(photos.saveFile(path).id);
         } catch (error) {
@@ -95,10 +82,6 @@ export function registerTools(ctx, service, helpers) {
         }
       }
       for (const url of urls.slice(-12)) {
-        if (!claimable(`url:${url}`)) {
-          skipped.push(`${url}（已经挂在别的物件上了）`);
-          continue;
-        }
         try {
           ids.push((await photos.saveUrl(url)).id);
         } catch (error) {
